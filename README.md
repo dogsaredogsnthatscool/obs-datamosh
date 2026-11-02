@@ -1,11 +1,13 @@
 # Datamosh filter for OBS (Windows)
 
-moshcap's DATAMOSH effect (`engine/fx/mosh.py`) as a plain OBS video filter: the old picture gets dragged along by the motion instead of refreshing. Everything runs on the GPU; one DLL, no data folder.
+A datamosh video filter for OBS: the old picture gets dragged along by the motion instead of refreshing. Everything runs on the GPU; one DLL, no data folder.
+
+![raw / smooth mosh / block mosh / amount 0](docs/preview.png)
 
 ## Install
 
 1. Close OBS.
-2. Unzip `dist/datamosh-filter.zip` into `C:\Program Files\obs-studio\` (it puts `datamosh-filter.dll` in `obs-plugins\64bit\`).
+2. Download `datamosh-filter.zip` from [Releases](../../releases/latest) and unzip it into `C:\Program Files\obs-studio\` (it puts `datamosh-filter.dll` in `obs-plugins\64bit\`).
 3. Open OBS, right-click a source > **Filters** > **+** under Effect Filters > **Datamosh**.
 
 ## Sliders
@@ -31,3 +33,7 @@ ZIG=zig OBS_SRC=path/to/obs-studio ./build.sh
 ```
 
 Needs [zig](https://ziglang.org) 0.14 and an obs-studio source tree (only `libobs/` headers are used). `./build.sh linux` with `OBS_LIB=` also builds a `.so` for testing in Linux OBS.
+
+## License
+
+GPL-2.0-or-later, like OBS itself.
