@@ -1,0 +1,171 @@
+// Datamosh for OBS: same idea as engine/fx/mosh.py. The old picture keeps getting dragged along by the motion
+// instead of refreshing. Motion comes from block matching this frame's luma against the last one.
+
+uniform float4x4 ViewProj;
+uniform texture2d image;     // LUMA: full-res source. FLOW: current luma. MOSH/OUT: current source
+uniform texture2d prev_tex;  // FLOW: previous luma. MOSH/OUT: mosh buffer
+uniform texture2d flow_tex;  // MOSH: motion in full-res pixels
+uniform float2 texel;        // 1 / size of the texture being read (LUMA: source, FLOW: luma, MOSH: flow)
+uniform float2 size;         // MOSH: output size in pixels
+uniform int search;          // FLOW: search radius in luma pixels
+uniform float scale;
+uniform float steady;
+uniform float blocks;
+uniform float refresh;
+uniform float amount;
+
+sampler_state lin {
+	Filter = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+sampler_state pnt {
+	Filter = Point;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+	return vert_out;
+}
+
+float luma(float4 c)
+{
+	return dot(c.rgb, float3(0.299, 0.587, 0.114));
+}
+
+// quarter-size luma: four bilinear taps = a 4x4 box
+float4 PSLuma(VertData v_in) : TARGET
+{
+	float l = luma(image.SampleLevel(lin, v_in.uv + float2(-1.0, -1.0) * texel, 0.0))
+		+ luma(image.SampleLevel(lin, v_in.uv + float2(1.0, -1.0) * texel, 0.0))
+		+ luma(image.SampleLevel(lin, v_in.uv + float2(-1.0, 1.0) * texel, 0.0))
+		+ luma(image.SampleLevel(lin, v_in.uv + float2(1.0, 1.0) * texel, 0.0));
+	return float4(l * 0.25, 0.0, 0.0, 1.0);
+}
+
+// mean difference of a 4x4 luma patch here against the last frame shifted by d
+float patch_cost(float2 uv, float2 d)
+{
+	float s = 0.0;
+	for (int j = 0; j < 4; j++) {
+		for (int i = 0; i < 4; i++) {
+			float2 o = (float2(i, j) - 1.5) * texel;
+			s += abs(image.SampleLevel(pnt, uv + o, 0.0).r - prev_tex.SampleLevel(lin, uv + o - d * texel, 0.0).r);
+		}
+	}
+	return s * 0.0625;
+}
+
+// one motion vector per 8x8 source pixels: where did this patch sit in the last frame?
+float4 PSFlow(VertData v_in) : TARGET
+{
+	float best = patch_cost(v_in.uv, float2(0.0, 0.0));
+	float2 bd = float2(0.0, 0.0);
+	float still = best;
+	for (int y = -search; y <= search; y++) {
+		for (int x = -search; x <= search; x++) {
+			float2 d = float2(x, y);
+			// small bias towards standing still, so flat or noisy areas don't wander
+			float k = patch_cost(v_in.uv, d) + 0.004 * length(d);
+			if (k < best) {
+				best = k;
+				bd = d;
+			}
+		}
+	}
+	if (still <= best + 0.002)
+		bd = float2(0.0, 0.0);
+
+	// sub-pixel: fit a parabola through the neighbours
+	float b0 = patch_cost(v_in.uv, bd);
+	float xl = patch_cost(v_in.uv, bd + float2(-1.0, 0.0));
+	float xr = patch_cost(v_in.uv, bd + float2(1.0, 0.0));
+	float yu = patch_cost(v_in.uv, bd + float2(0.0, -1.0));
+	float yd = patch_cost(v_in.uv, bd + float2(0.0, 1.0));
+	float dx = xl - 2.0 * b0 + xr;
+	float dy = yu - 2.0 * b0 + yd;
+	float2 sub = float2(dx > 0.00001 ? clamp((xl - xr) / (2.0 * dx), -0.5, 0.5) : 0.0,
+			    dy > 0.00001 ? clamp((yu - yd) / (2.0 * dy), -0.5, 0.5) : 0.0);
+
+	return float4((bd + sub) * 4.0, 0.0, 1.0); // luma is quarter size: back to source pixels
+}
+
+float2 flow_at(float2 uv)
+{
+	float r = 0.5 + steady * 3.0;
+	float2 f = float2(0.0, 0.0);
+	for (int j = -1; j <= 1; j++) {
+		for (int i = -1; i <= 1; i++)
+			f += flow_tex.SampleLevel(lin, uv + float2(i, j) * r * texel, 0.0).rg;
+	}
+	return f / 9.0;
+}
+
+// drag the old buffer along the motion, then let a little of the real picture back in
+float4 PSMosh(VertData v_in) : TARGET
+{
+	float2 uv = v_in.uv;
+	float4 moved;
+	if (blocks >= 4.0) {
+		// one vector per macroblock, moved in hard chunks like a broken video file
+		float2 q = (floor(uv * size / blocks) + 0.5) * blocks / size;
+		float2 f = flow_at(q) * scale;
+		moved = prev_tex.SampleLevel(pnt, uv - f / size, 0.0);
+	} else {
+		float2 f = flow_at(uv) * scale;
+		moved = prev_tex.SampleLevel(lin, uv - f / size, 0.0);
+	}
+	return lerp(moved, image.SampleLevel(pnt, uv, 0.0), refresh);
+}
+
+float4 PSOut(VertData v_in) : TARGET
+{
+	return lerp(image.SampleLevel(pnt, v_in.uv, 0.0), prev_tex.SampleLevel(pnt, v_in.uv, 0.0), amount);
+}
+
+technique Luma
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSLuma(v_in);
+	}
+}
+
+technique Flow
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSFlow(v_in);
+	}
+}
+
+technique Mosh
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSMosh(v_in);
+	}
+}
+
+technique Out
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSOut(v_in);
+	}
+}
