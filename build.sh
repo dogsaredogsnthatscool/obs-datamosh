@@ -25,6 +25,7 @@ CFLAGS=(-O2 -std=c11 -Wall -Wno-unused-parameter -I"$B/inc" -I"$OBS_SRC/libobs")
 "$ZIG" dlltool -d "$B/obs.def" -l "$B/libobs.a" -m i386:x86-64
 "$ZIG" cc -target x86_64-windows-gnu -shared -o dist/datamosh-filter.dll "$B/mosh-filter.obj" "$B/libobs.a" \
 	-Wl,--export-all-symbols -s
+rm -f dist/*.lib # import lib zig leaves behind; nobody links against us
 echo "built dist/datamosh-filter.dll"
 
 if [ "${1:-}" = linux ]; then
