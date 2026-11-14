@@ -1,0 +1,246 @@
+// Point Cloud for OBS: engine/fx/pointcloud.py without a depth camera. Depth is guessed from the picture itself
+// (brightness, a centre bulge, and optionally "what differs from the empty room"), everything at dot-grid size,
+// so the only full-size work is growing the dots and the final mix.
+
+uniform float4x4 ViewProj;
+uniform texture2d image;     // DOWN: source. BLUR/DEPTH/PACK: cell colours. DOTS: raw points. GLOW*: dots. OUT: source
+uniform texture2d prev_tex;  // DEPTH: last depth. PACK: depth. DOTS: last dots (trails). OUT: dots
+uniform texture2d aux_tex;   // DEPTH: learned background. OUT: glow
+uniform float2 texel;        // 1 / size of `image`
+uniform float2 cell;         // DOWN: one dot cell in uv
+uniform float bright;        // DEPTH: bright = near (negative: dark = near)
+uniform float bulge;         // DEPTH: the middle of the picture comes forward
+uniform float steady;        // DEPTH: how much of the last depth is kept
+uniform float has_bg;        // DEPTH: a background was learned
+uniform float bg_tol;        // DEPTH: how different from the background counts as "you"
+uniform float color_mode;    // PACK: 0 white, 1 cyan, 2 picture
+uniform float light;         // PACK: side light
+uniform float light_k;
+uniform float cut;           // PACK: drop dots farther than this
+uniform float hide;          // PACK: drop the learned background
+uniform float gain;          // POINTS
+uniform int rad;             // DOTS: dot radius in pixels, rounded up
+uniform float rad2;          // DOTS: radius squared
+uniform float fade;          // DOTS: trails
+uniform float glow;          // OUT
+uniform float bgmix;         // OUT: picture behind
+uniform float transparent;   // OUT
+
+sampler_state lin {
+	Filter = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+sampler_state pnt {
+	Filter = Point;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+};
+
+struct PointData {
+	float4 pos : POSITION;
+	float4 color : COLOR;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+	return vert_out;
+}
+
+PointData VSPoint(PointData v_in)
+{
+	PointData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.color = v_in.color;
+	return vert_out;
+}
+
+float luma(float4 c)
+{
+	return dot(c.rgb, float3(0.299, 0.587, 0.114));
+}
+
+// the source shrunk to one texel per dot cell
+float4 PSDown(VertData v_in) : TARGET
+{
+	float2 o = cell * 0.25;
+	return (image.SampleLevel(lin, v_in.uv + float2(-o.x, -o.y), 0.0) + image.SampleLevel(lin, v_in.uv + float2(o.x, -o.y), 0.0)
+		+ image.SampleLevel(lin, v_in.uv + float2(-o.x, o.y), 0.0) + image.SampleLevel(lin, v_in.uv + float2(o.x, o.y), 0.0)) * 0.25;
+}
+
+// a 3x3 blur (the glow)
+float4 PSBlur(VertData v_in) : TARGET
+{
+	float4 s = float4(0.0, 0.0, 0.0, 0.0);
+	for (int j = -1; j <= 1; j++) {
+		for (int i = -1; i <= 1; i++)
+			s += image.SampleLevel(lin, v_in.uv + float2(i, j) * 1.5 * texel, 0.0);
+	}
+	return s / 9.0;
+}
+
+// the guess: x = depth (1 near, 0 far), y = "this is not the empty room"
+float2 depth_raw(float2 uv)
+{
+	float4 c = image.SampleLevel(lin, uv, 0.0);
+	float2 q = uv - 0.5;
+	float centre = saturate(1.0 - dot(q, q) * 3.0);
+	float d = saturate(0.5 + bright * (luma(c) - 0.5) + bulge * (centre - 0.5));
+	float m = 1.0;
+	if (has_bg > 0.5) {
+		float3 df = abs(c.rgb - aux_tex.SampleLevel(lin, uv, 0.0).rgb);
+		m = smoothstep(bg_tol, bg_tol * 2.5, df.r + df.g + df.b);
+		d = lerp(d * 0.45, 0.55 + d * 0.45, m); // whoever stepped in stands in front of the room
+	}
+	return float2(d, m);
+}
+
+float4 PSDepth(VertData v_in) : TARGET
+{
+	float2 s = float2(0.0, 0.0);
+	for (int j = -1; j <= 1; j++) {
+		for (int i = -1; i <= 1; i++)
+			s += depth_raw(v_in.uv + float2(i, j) * 1.5 * texel);
+	}
+	float2 last = prev_tex.SampleLevel(pnt, v_in.uv, 0.0).rg;
+	return float4(lerp(s / 9.0, last, steady), 0.0, 1.0);
+}
+
+// what the CPU reads back, one texel per dot: rgb = the dot's light (halved, to leave headroom), a = depth (0 = no dot)
+float4 PSPack(VertData v_in) : TARGET
+{
+	float4 c = image.SampleLevel(lin, v_in.uv, 0.0);
+	float2 dm = prev_tex.SampleLevel(pnt, v_in.uv, 0.0).rg;
+	float dl = prev_tex.SampleLevel(pnt, v_in.uv - float2(texel.x, 0.0), 0.0).r;
+	float dr = prev_tex.SampleLevel(pnt, v_in.uv + float2(texel.x, 0.0), 0.0).r;
+	float lit = (1.0 - light) + light * clamp(0.5 - 0.9 * (dr - dl) * light_k, 0.0, 1.4);
+	float3 col;
+	if (color_mode > 1.5) {
+		col = c.rgb * lit;
+	} else {
+		float b = (pow(max(luma(c), 0.0), 0.7) * 0.7 + 0.3) * lit;
+		col = b * (color_mode > 0.5 ? float3(0.55, 0.9, 1.0) : float3(1.0, 1.0, 1.0));
+	}
+	col *= clamp(0.5 + 0.9 * dm.x, 0.4, 1.4); // near dots brighter
+	float keep = step(cut, dm.x) * step(0.01, c.a);
+	if (hide > 0.5)
+		keep *= step(0.5, dm.y);
+	return float4(col * 0.5, keep * (1.0 + dm.x * 254.0) / 255.0);
+}
+
+float4 PSPoint(PointData v_in) : TARGET
+{
+	return float4(v_in.color.rgb * gain, 1.0);
+}
+
+// grow each one-pixel point to a round dot, and keep a fading memory of the last frames
+float4 PSDots(VertData v_in) : TARGET
+{
+	float3 m = float3(0.0, 0.0, 0.0);
+	for (int j = -rad; j <= rad; j++) {
+		for (int i = -rad; i <= rad; i++) {
+			if (float(i * i + j * j) <= rad2)
+				m = max(m, image.SampleLevel(pnt, v_in.uv + float2(i, j) * texel, 0.0).rgb);
+		}
+	}
+	float3 last = prev_tex.SampleLevel(pnt, v_in.uv, 0.0).rgb * fade;
+	return float4(min(max(m, last), float3(8.0, 8.0, 8.0)), 1.0);
+}
+
+float4 PSGlowDown(VertData v_in) : TARGET
+{
+	return (image.SampleLevel(lin, v_in.uv + float2(-1.0, -1.0) * texel, 0.0) + image.SampleLevel(lin, v_in.uv + float2(1.0, -1.0) * texel, 0.0)
+		+ image.SampleLevel(lin, v_in.uv + float2(-1.0, 1.0) * texel, 0.0) + image.SampleLevel(lin, v_in.uv + float2(1.0, 1.0) * texel, 0.0)) * 0.25;
+}
+
+float4 PSOut(VertData v_in) : TARGET
+{
+	float3 c = prev_tex.SampleLevel(lin, v_in.uv, 0.0).rgb + aux_tex.SampleLevel(lin, v_in.uv, 0.0).rgb * glow * 2.2;
+	float4 src = image.SampleLevel(pnt, v_in.uv, 0.0);
+	float3 o = saturate(c + src.rgb * bgmix * 0.6);
+	float a = 1.0;
+	if (transparent > 0.5)
+		a = saturate(max(max(o.r, o.g), o.b) + src.a * bgmix);
+	return float4(o, a);
+}
+
+technique Down
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSDown(v_in);
+	}
+}
+
+technique Blur
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSBlur(v_in);
+	}
+}
+
+technique Depth
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSDepth(v_in);
+	}
+}
+
+technique Pack
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSPack(v_in);
+	}
+}
+
+technique Points
+{
+	pass
+	{
+		vertex_shader = VSPoint(v_in);
+		pixel_shader = PSPoint(v_in);
+	}
+}
+
+technique Dots
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSDots(v_in);
+	}
+}
+
+technique GlowDown
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSGlowDown(v_in);
+	}
+}
+
+technique Out
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSOut(v_in);
+	}
+}

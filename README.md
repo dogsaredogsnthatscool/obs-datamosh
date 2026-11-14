@@ -5,6 +5,8 @@ A datamosh video filter for OBS Studio on Windows. Instead of updating to the ne
 ![raw / smooth mosh / block mosh / amount 0](docs/preview.png)
 *Clean source · smooth mosh · block mosh · Amount 0*
 
+The same download also adds **Point Cloud**: you as thousands of glowing dots in 3D, slowly orbiting, with dust breaking off where you move. It needs no depth camera and no AI model, just a normal webcam. See [Point Cloud](#point-cloud) below.
+
 ## Requirements
 
 - OBS Studio **31.1 or newer** (made for 32.1.0), 64-bit Windows 10 or 11
@@ -52,6 +54,39 @@ In **Settings → Hotkeys**, type `datamosh` in the filter box to find **Datamos
 - **Ghost trails:** Amount 0.6, Refresh 0.1. A light smear that cleans itself up.
 - **Hands-free:** Auto reset 4 s, Refresh 0. A fresh mosh every few seconds.
 
+## Point Cloud
+
+![test clip / dots / dots in picture colour over the picture](docs/pointcloud.png)
+*Test clip · White dots after Learn background · Picture colour with Picture behind*
+
+Add it the same way: **Filters** → **+** → **Point Cloud**.
+
+A webcam has no depth, so the filter guesses one from the picture: bright things come forward, the middle of the picture comes forward, and (best) anything that was not in the empty room comes forward. The guess runs on a small grid of dots, so it is light: any GPU that runs OBS is enough, and the CPU only moves a few tens of thousands of points.
+
+**For the full effect:** step out of the picture, click **Learn background**, step back in. Now only you are dots, floating on black. Keep the camera and the lighting still; if the room changes, click it again. Without it, the whole picture becomes dots. The learned background is forgotten when OBS restarts.
+
+| Slider | What it does | Default |
+|---|---|---|
+| **Dot spacing** | Lower = more dots (heavier) | 6 |
+| **Dot size**, **Brightness**, **Glow** | How the dots look | 1.5 / 1 / 0.7 |
+| **Sparkle** | How much every dot shakes each frame. 0 = steady dots | 0.25 |
+| **Colour** | White, Cyan, or the picture's own colours | White |
+| **Side light** | Shades the dots as if lit from the side | 0.6 |
+| **Depth** | How deep the scene is. 0 = a flat sheet of dots | 0.8 |
+| **Bright is near** | How much brightness pushes forward. Negative: dark is near | 0.7 |
+| **Middle comes forward** | Bulges the centre of the picture towards you | 0.5 |
+| **Steady depth** | Smooths the depth over time | 0.6 |
+| **Hide the farthest** | Drops the dots farthest away | 0 |
+| **Orbit degrees**, **Orbit speed** | How far and how fast the view swings round | 12 / 0.12 |
+| **Dust off movement**, **Wind** | Dots that break off where you move, and where they drift | 0.4 / 0.5 |
+| **Trails** | How long dots linger | 0.55 |
+| **Picture behind** | Shows the real picture under the dots | 0 |
+| **Transparent where there are no dots** | Lets the sources below show through | off |
+| **Dots on you only** | After Learn background: hide the room | on |
+| **Background tolerance** | Raise if bits of the room show up as dots; lower if parts of you go missing | 0.07 |
+
+Lighter on the computer: raise **Dot spacing**, set **Dot size** to 1 or less, **Dust** to 0. Above 1080p the dots are drawn at half size automatically.
+
 ## Good to know
 
 - Areas of flat, single colour don't move. There's nothing in them to track, so texture and edges smear best.
@@ -76,9 +111,11 @@ Cross-compiles from Linux with zig, so you don't need Visual Studio:
 ZIG=zig OBS_SRC=path/to/obs-studio ./build.sh
 ```
 
-Needs [zig](https://ziglang.org) 0.14 and an obs-studio source tree (only the `libobs/` headers are used). Output: `dist/datamosh-filter.dll`. `./build.sh linux` with `OBS_LIB=` also builds a `.so` for testing in Linux OBS.
+Needs [zig](https://ziglang.org) 0.14 and an obs-studio source tree (only the `libobs/` headers are used). Output: `dist/datamosh-filter.dll` (both filters). `./build.sh linux` with `OBS_LIB=` also builds a `.so` for testing in Linux OBS.
 
 The shader is in [`src/mosh.effect`](src/mosh.effect): block-matched motion between frames drags a buffer of old frames along, and the real picture leaks back in at the Refresh rate.
+
+`test/run.sh` plays raw RGBA frames through a filter inside libobs without the OBS window and saves chosen output frames (Linux, needs Xvfb): how the Point Cloud filter was checked.
 
 ## License
 
