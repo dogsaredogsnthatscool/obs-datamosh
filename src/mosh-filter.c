@@ -292,8 +292,11 @@ static struct obs_source_info mosh_filter = {
 	.video_render = mosh_render,
 };
 
+extern struct obs_source_info pointcloud_filter; // pointcloud-filter.c
+
 bool obs_module_load(void)
 {
 	obs_register_source(&mosh_filter);
+	obs_register_source(&pointcloud_filter);
 	return true;
 }

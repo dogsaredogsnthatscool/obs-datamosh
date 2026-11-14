@@ -11,26 +11,30 @@ mkdir -p "$B/inc" dist
 
 # headers the cmake build would normally generate
 printf '#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n' > "$B/inc/obsconfig.h"
-python3 - src/mosh.effect "$B/inc/mosh-effect.h" <<'EOF'
+for e in mosh pointcloud; do
+python3 - "src/$e.effect" "$B/inc/$e-effect.h" "${e^^}_EFFECT" <<'EOF'
 import sys, json
 src = open(sys.argv[1]).read()
-open(sys.argv[2], "w").write("static const char MOSH_EFFECT[] = " + "\n".join(json.dumps(l + "\n") for l in src.split("\n")) + ";\n")
+open(sys.argv[2], "w").write("static const char " + sys.argv[3] + "[] = " + "\n".join(json.dumps(l + "\n") for l in src.split("\n")) + ";\n")
 EOF
+done
 CFLAGS=(-O2 -std=c11 -Wall -Wno-unused-parameter -I"$B/inc" -I"$OBS_SRC/libobs")
 
 # Windows: import obs.dll through a .def of exactly the functions we call
-"$ZIG" cc -target x86_64-windows-gnu "${CFLAGS[@]}" -c src/mosh-filter.c -o "$B/mosh-filter.obj"
+for c in mosh-filter pointcloud-filter; do
+	"$ZIG" cc -target x86_64-windows-gnu "${CFLAGS[@]}" -c "src/$c.c" -o "$B/$c.obj"
+done
 { echo "LIBRARY obs.dll"; echo "EXPORTS"
-  nm -u "$B/mosh-filter.obj" | awk '{print $2}' | grep -E '^(obs_|gs_|b(z|m)alloc|bfree|blog|vec)' ; } > "$B/obs.def"
+  nm -u "$B/mosh-filter.obj" "$B/pointcloud-filter.obj" | awk '{print $2}' | grep -E '^(obs_|gs_|b(z|m)alloc|bfree|blog|vec)' | sort -u ; } > "$B/obs.def"
 "$ZIG" dlltool -d "$B/obs.def" -l "$B/libobs.a" -m i386:x86-64
-"$ZIG" cc -target x86_64-windows-gnu -shared -o dist/datamosh-filter.dll "$B/mosh-filter.obj" "$B/libobs.a" \
+"$ZIG" cc -target x86_64-windows-gnu -shared -o dist/datamosh-filter.dll "$B/mosh-filter.obj" "$B/pointcloud-filter.obj" "$B/libobs.a" \
 	-Wl,--export-all-symbols -s
 rm -f dist/*.lib # import lib zig leaves behind; nobody links against us
 echo "built dist/datamosh-filter.dll"
 
 if [ "${1:-}" = linux ]; then
 	: "${OBS_LIB:?set OBS_LIB to the dir holding libobs.so}"
-	"$ZIG" cc -target x86_64-linux-gnu "${CFLAGS[@]}" -fPIC -shared -o "$B/datamosh-filter.so" src/mosh-filter.c \
+	"$ZIG" cc -target x86_64-linux-gnu "${CFLAGS[@]}" -fPIC -shared -o "$B/datamosh-filter.so" src/mosh-filter.c src/pointcloud-filter.c -lm \
 		"$OBS_LIB/libobs.so.30"
 	echo "built $B/datamosh-filter.so"
 fi
