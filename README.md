@@ -106,8 +106,11 @@ Faces are found on the CPU in a background thread with OpenCV's small LBP face f
 | **Keep covering after a face is lost** | Seconds the cover stays put when the finder misses a frame (a turned head, a hand) | 0.5 |
 | **Find smaller / farther faces** | Searches a bigger picture (more CPU) | off |
 | **Blur the whole picture while no face is found** | The safe option for streaming: nothing shows uncovered | off |
+| **Debug** | Outlines each face it's tracking (green = seen on the last look, orange = held after a miss), puts a red edge on the picture while the whole-picture blur is on, and writes the face finder's status to the OBS log every 2 seconds | off |
 
 It finds faces looking roughly at the camera. A face turned well away or in profile is missed: **Keep covering** bridges short turns, and **Blur the whole picture while no face is found** covers the rest. Eye bar places the bar from the face box, so it does not tilt with your head.
+
+Reporting a Face Censor problem: tick **Debug**, reproduce the problem for 10 seconds or so, then in OBS choose **Help → Log Files → Upload Current Log File** and send the link (lines start with `[face censor]`). A screenshot with the outlines showing helps too.
 
 ## Good to know
 

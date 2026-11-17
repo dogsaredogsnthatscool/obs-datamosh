@@ -4,6 +4,7 @@
 // are tracked (held for a moment when the finder misses one), smoothed with the engine's speed-aware STEADY, and drawn.
 
 #include <obs-module.h>
+#include <util/platform.h>
 #include <graphics/vec2.h>
 #include <graphics/vec4.h>
 #include <math.h>
@@ -11,6 +12,8 @@
 
 #include "censor-effect.h" // CENSOR_EFFECT: src/censor.effect as a string, made by build.sh
 #include "facedetect.h"
+
+#define CENSOR_VERSION "1.2.1-beta"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -68,13 +71,18 @@ struct censor {
 	struct fd_rect res[MAX_FACES];
 	int nres;
 	uint32_t seq, seen_seq;
+	uint64_t runs, run_ns; // debug: finder runs and time spent (worker side, under lk)
+	int last_raw;          // debug: faces in the last finder run
 
 	struct track tr[MAX_FACES];
 
 	int mode, style, shape, levels;
 	float size, length, thick, smooth, roundc, lift, block, feather, soften, strong, hold;
 	uint32_t color;
-	bool small_faces, cover_lost;
+	bool small_faces, cover_lost, debug;
+	bool was_cover, rendered_log;
+	float log_t;
+	bool seen_now[MAX_FACES]; // debug: track matched in the latest finder result
 };
 
 static const char *censor_name(void *unused)
@@ -110,12 +118,17 @@ static void *worker(void *data)
 		unlock(&f->lk);
 
 		struct fd_rect r[MAX_FACES];
+		const uint64_t t0 = os_gettime_ns();
 		const int n = fd_detect(buf, w, h, w, 24, r, MAX_FACES);
+		const uint64_t took = os_gettime_ns() - t0;
 
 		lock(&f->lk);
 		memcpy(f->res, r, sizeof(r));
 		f->nres = n;
 		f->seq++;
+		f->runs++;
+		f->run_ns += took;
+		f->last_raw = n;
 		f->pending = false;
 	}
 	unlock(&f->lk);
@@ -191,6 +204,7 @@ static void update_tracks(struct censor *f, const struct fd_rect *r, int n, floa
 			used[t - f->tr] = true;
 		}
 	}
+	memcpy(f->seen_now, used, sizeof(used));
 }
 
 // ---------------------------------------------------------------- settings
@@ -216,6 +230,7 @@ static void censor_update(void *data, obs_data_t *s)
 	f->strong = (float)obs_data_get_double(s, "strong");
 	f->small_faces = obs_data_get_bool(s, "small_faces");
 	f->cover_lost = obs_data_get_bool(s, "cover_lost");
+	f->debug = obs_data_get_bool(s, "debug");
 }
 
 // the defaults are censor.py's (mode 0 = the old EYE BAR, its most-used look)
@@ -239,6 +254,7 @@ static void censor_defaults(obs_data_t *s)
 	obs_data_set_default_double(s, "strong", 0.75);
 	obs_data_set_default_bool(s, "small_faces", false);
 	obs_data_set_default_bool(s, "cover_lost", false);
+	obs_data_set_default_bool(s, "debug", false);
 }
 
 static void vis(obs_properties_t *p, const char *name, bool on)
@@ -304,6 +320,7 @@ static obs_properties_t *censor_properties(void *data)
 	obs_properties_add_float_slider(p, "hold", "Keep covering after a face is lost (s)", 0.0, 5.0, 0.1);
 	obs_properties_add_bool(p, "small_faces", "Find smaller / farther faces (more CPU)");
 	obs_properties_add_bool(p, "cover_lost", "Blur the whole picture while no face is found");
+	obs_properties_add_bool(p, "debug", "Debug: outline found faces and log the face finder (for bug reports)");
 	return p;
 }
 
@@ -324,12 +341,13 @@ static void *censor_create(obs_data_t *settings, obs_source_t *source)
 #endif
 	if (!f->running)
 		blog(LOG_ERROR, "[face censor] could not start the face-finding thread");
+	blog(LOG_INFO, "[face censor] v" CENSOR_VERSION " created, finder thread %s", f->running ? "running" : "FAILED");
 
 	obs_enter_graphics();
 	char *err = NULL;
 	f->effect = gs_effect_create(CENSOR_EFFECT, "censor.effect", &err);
 	if (!f->effect)
-		blog(LOG_ERROR, "[face censor] effect failed to compile: %s", err ? err : "?");
+		blog(LOG_ERROR, "[face censor] v" CENSOR_VERSION " effect failed to compile: %s", err ? err : "?");
 	bfree(err);
 	f->cur = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	f->grey = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
@@ -511,6 +529,38 @@ static void find_faces(struct censor *f)
 	}
 }
 
+// debug: one line every 2 s (and whenever the whole-picture blur turns on or off) in the OBS log
+static void debug_log(struct censor *f, int nf, bool cover)
+{
+	if (cover != f->was_cover) {
+		f->was_cover = cover;
+		blog(LOG_INFO, "[face censor] whole-picture blur %s", cover ? "ON (no face tracked)" : "off (face tracked)");
+	}
+	f->log_t += f->dt;
+	if (f->log_t < 2.0f)
+		return;
+	lock(&f->lk);
+	const uint64_t runs = f->runs, ns = f->run_ns;
+	const int raw = f->last_raw, jw = f->jw, jh = f->jh;
+	f->runs = f->run_ns = 0;
+	unlock(&f->lk);
+	char tr[MAX_FACES * 64] = "", one[64];
+	for (int i = 0; i < MAX_FACES; i++) {
+		const struct track *t = &f->tr[i];
+		if (!t->on)
+			continue;
+		snprintf(one, sizeof(one), " #%d %s %.2fs at %.0f,%.0f %.0fx%.0f", i, f->seen_now[i] ? "seen" : "held", t->lost, t->box[0],
+			 t->box[1], t->box[2] - t->box[0], t->box[3] - t->box[1]);
+		strncat(tr, one, sizeof(tr) - strlen(tr) - 1);
+	}
+	blog(LOG_INFO,
+	     "[face censor] v" CENSOR_VERSION " %ux%u mode=%d cover_lost=%d hold=%.2f small=%d | finder %dx%d thread=%s %.1f looks/s %.1f ms/look, "
+	     "last look found %d | tracks:%s | drawn=%d cover=%d",
+	     f->w, f->h, f->mode, f->cover_lost, f->hold, f->small_faces, jw, jh, f->running ? "ok" : "FAILED", runs / f->log_t,
+	     runs ? ns / 1e6 / runs : 0.0, raw, tr[0] ? tr : " none", nf, cover);
+	f->log_t = 0.0f;
+}
+
 static void censor_render(void *data, gs_effect_t *unused)
 {
 	UNUSED_PARAMETER(unused);
@@ -532,6 +582,7 @@ static void censor_render(void *data, gs_effect_t *unused)
 
 	if (!f->rendered) {
 		f->rendered = true;
+		f->rendered_log = true;
 		if (w != f->w || h != f->h) {
 			f->w = w;
 			f->h = h;
@@ -579,7 +630,11 @@ static void censor_render(void *data, gs_effect_t *unused)
 	const bool cover = !whole && nf == 0 && f->cover_lost;
 	if (cover)
 		blur_r = fmaxf(12.0f, (float)w / 40.0f);
-	if (!whole && nf == 0 && !cover) {
+	if (f->debug && f->rendered_log) {
+		f->rendered_log = false;
+		debug_log(f, nf, cover);
+	}
+	if (!whole && nf == 0 && !cover && !f->debug) {
 		// nothing to cover: the plain picture
 		gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 		gs_effect_set_texture(gs_effect_get_param_by_name(def, "image"), gs_texrender_get_texture(f->cur));
@@ -610,6 +665,15 @@ static void censor_render(void *data, gs_effect_t *unused)
 	set_float(f, "feather", f->feather);
 	set_float(f, "soften", f->soften);
 	set_float(f, "cover", cover ? 1.0f : 0.0f);
+	set_float(f, "dbg", f->debug ? 1.0f : 0.0f);
+	static const char *tn[MAX_FACES] = {"t0", "t1", "t2", "t3"};
+	float tst[MAX_FACES];
+	for (int i = 0; i < MAX_FACES; i++) {
+		const struct track *t = &f->tr[i];
+		tst[i] = whole || !t->on ? 0.0f : f->seen_now[i] ? 1.0f : 2.0f;
+		set_vec4(f, tn[i], t->box[0], t->box[1], t->box[2], t->box[3]);
+	}
+	set_vec4(f, "tst", tst[0], tst[1], tst[2], tst[3]);
 	set_float(f, "nface", (float)nf);
 	static const char *fn[MAX_FACES] = {"f0", "f1", "f2", "f3"};
 	for (int i = 0; i < MAX_FACES; i++)
