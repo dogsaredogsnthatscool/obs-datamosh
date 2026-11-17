@@ -7,6 +7,8 @@ A datamosh video filter for OBS Studio on Windows. Instead of updating to the ne
 
 The same download also adds **Point Cloud**: you as thousands of glowing dots in 3D, slowly orbiting, with dust breaking off where you move. It needs no depth camera and no AI model, just a normal webcam. See [Point Cloud](#point-cloud) below.
 
+And **Face Censor**: an eye bar, pixelated face or news-style blur that follows faces live, again with no AI model. See [Face Censor](#face-censor) below.
+
 ## Requirements
 
 - OBS Studio **31.1 or newer** (made for 32.1.0), 64-bit Windows 10 or 11
@@ -87,6 +89,26 @@ A webcam has no depth, so the filter guesses one from the picture: bright things
 
 Lighter on the computer: raise **Dot spacing**, set **Dot size** to 1 or less, **Dust** to 0. Above 1080p the dots are drawn at half size automatically.
 
+## Face Censor
+
+Covers faces live, four ways: **Eye bar** (the classic black bar across the eyes), **Face pixel** (blocks over the face, pinned to it so they don't crawl), **Pixelate** (the whole picture) and **News blur** (a soft blurred oval). Add it the same way: **Filters** → **+** → **Face Censor**, then pick a **Mode**; only that mode's sliders show.
+
+Faces are found on the CPU in a background thread with OpenCV's small LBP face finder, built into the DLL: no AI model, no download. Up to four faces at once.
+
+| Slider | What it does | Default |
+|---|---|---|
+| **Size** | Scales the bar or oval | 1 |
+| **Bar length / thickness / fill / colour / round corners / up-down** | Eye bar only. Fill: solid colour, pixels or blur | 2.6 / 0.5 / solid black |
+| **Block size** | Face pixel and Pixelate | 16 px |
+| **Shape / Colours / Edge softness** | Face pixel: oval or box, fewer colours for a retro look, soft or hard edge | oval / all / 0.15 |
+| **Feather / Blur strength** | News blur | 0.6 / 0.75 |
+| **Steady** | Holds a still face's cover still; fast moves still pass straight through | 0.6 |
+| **Keep covering after a face is lost** | Seconds the cover stays put when the finder misses a frame (a turned head, a hand) | 0.5 |
+| **Find smaller / farther faces** | Searches a bigger picture (more CPU) | off |
+| **Blur the whole picture while no face is found** | The safe option for streaming: nothing shows uncovered | off |
+
+It finds faces looking roughly at the camera. A face turned well away or in profile is missed: **Keep covering** bridges short turns, and **Blur the whole picture while no face is found** covers the rest. Eye bar places the bar from the face box, so it does not tilt with your head.
+
 ## Good to know
 
 - Areas of flat, single colour don't move. There's nothing in them to track, so texture and edges smear best.
@@ -111,12 +133,12 @@ Cross-compiles from Linux with zig, so you don't need Visual Studio:
 ZIG=zig OBS_SRC=path/to/obs-studio ./build.sh
 ```
 
-Needs [zig](https://ziglang.org) 0.14 and an obs-studio source tree (only the `libobs/` headers are used). Output: `dist/datamosh-filter.dll` (both filters). `./build.sh linux` with `OBS_LIB=` also builds a `.so` for testing in Linux OBS.
+Needs [zig](https://ziglang.org) 0.14 and an obs-studio source tree (only the `libobs/` headers are used). Output: `dist/datamosh-filter.dll` (all three filters). `./build.sh linux` with `OBS_LIB=` also builds a `.so` for testing in Linux OBS.
 
 The shader is in [`src/mosh.effect`](src/mosh.effect): block-matched motion between frames drags a buffer of old frames along, and the real picture leaks back in at the Refresh rate.
 
-`test/run.sh` plays raw RGBA frames through a filter inside libobs without the OBS window and saves chosen output frames (Linux, needs Xvfb): how the Point Cloud filter was checked.
+`test/run.sh` plays raw RGBA frames through a filter inside libobs without the OBS window and saves chosen output frames (Linux, needs Xvfb): how the Point Cloud and Face Censor filters were checked.
 
 ## License
 
-GPL-2.0-or-later, like OBS itself.
+GPL-2.0-or-later, like OBS itself. The face finder data ([`data/lbpcascade_frontalface_opencv.xml`](data/)) is OpenCV's, under its BSD-style license (see [`data/README.md`](data/README.md)).

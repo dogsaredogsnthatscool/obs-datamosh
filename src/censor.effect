@@ -1,0 +1,222 @@
+// Face Censor for OBS: engine/fx/censor.py's four modes. The faces are found on the CPU (facedetect.c); this draws the cover.
+// Faces come in as up to four float4s in source pixels: EYE BAR (eye centre x, y, half length, half thickness),
+// the others (centre x, y, half width, half height of the oval).
+
+uniform float4x4 ViewProj;
+uniform texture2d image;     // DOWN: source. BLURH/BLURV: what to blur. GREY: source. OUT: source
+uniform texture2d blur_tex;  // OUT: the blurred source
+uniform float2 texel;        // 1 / size of `image` (BLUR*: of the small picture)
+uniform float2 cell;         // DOWN / GREY: one output texel in source uv
+uniform float2 size;         // OUT: source size in pixels
+uniform float mode;          // 0 EYE BAR, 1 FACE PIXEL, 2 PIXELATE, 3 NEWS BLUR
+uniform float style;         // EYE BAR: 0 solid, 1 pixels, 2 blur
+uniform float4 bar_color;
+uniform float round_k;       // EYE BAR: corner radius / half thickness
+uniform float block;         // pixel block size in source pixels
+uniform float levels;        // FACE PIXEL: colours per channel (0 = all)
+uniform float shape;         // FACE PIXEL: 0 oval, 1 box
+uniform float feather;       // FACE PIXEL edge softness
+uniform float soften;        // NEWS BLUR feather
+uniform float cover;         // OUT: blur the whole picture (no face found)
+uniform float nface;
+uniform float4 f0;
+uniform float4 f1;
+uniform float4 f2;
+uniform float4 f3;
+
+sampler_state lin {
+	Filter = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+	return vert_out;
+}
+
+// the source shrunk so one output texel is the average of a `cell` (4x4 taps)
+float4 down4(float2 uv)
+{
+	float4 s = float4(0.0, 0.0, 0.0, 0.0);
+	for (int j = 0; j < 4; j++) {
+		for (int i = 0; i < 4; i++)
+			s += image.SampleLevel(lin, uv + (float2(i, j) - 1.5) * 0.25 * cell, 0.0);
+	}
+	return s / 16.0;
+}
+
+float4 PSDown(VertData v_in) : TARGET
+{
+	return down4(v_in.uv);
+}
+
+// what the face finder reads: brightness, in red
+float4 PSGrey(VertData v_in) : TARGET
+{
+	float y = dot(down4(v_in.uv).rgb, float3(0.299, 0.587, 0.114));
+	return float4(y, y, y, 1.0);
+}
+
+// 13-tap gaussian, sigma 3 texels (the small picture is shrunk so that is the wanted radius)
+float4 blur13(float2 uv, float2 dir)
+{
+	float4 s = image.SampleLevel(lin, uv, 0.0) * 0.1330;
+	float2 d = dir * texel;
+	s += (image.SampleLevel(lin, uv + d, 0.0) + image.SampleLevel(lin, uv - d, 0.0)) * 0.1258;
+	s += (image.SampleLevel(lin, uv + d * 2.0, 0.0) + image.SampleLevel(lin, uv - d * 2.0, 0.0)) * 0.1065;
+	s += (image.SampleLevel(lin, uv + d * 3.0, 0.0) + image.SampleLevel(lin, uv - d * 3.0, 0.0)) * 0.0807;
+	s += (image.SampleLevel(lin, uv + d * 4.0, 0.0) + image.SampleLevel(lin, uv - d * 4.0, 0.0)) * 0.0547;
+	s += (image.SampleLevel(lin, uv + d * 5.0, 0.0) + image.SampleLevel(lin, uv - d * 5.0, 0.0)) * 0.0332;
+	s += (image.SampleLevel(lin, uv + d * 6.0, 0.0) + image.SampleLevel(lin, uv - d * 6.0, 0.0)) * 0.0180;
+	return s / 0.9708;
+}
+
+float4 PSBlurH(VertData v_in) : TARGET
+{
+	return blur13(v_in.uv, float2(1.0, 0.0));
+}
+
+float4 PSBlurV(VertData v_in) : TARGET
+{
+	return blur13(v_in.uv, float2(0.0, 1.0));
+}
+
+// how much of the pixel at p this face covers
+float face_mask(float4 f, float2 p)
+{
+	if (mode < 0.5) { // EYE BAR: a rounded box, 1px anti-aliased edge
+		float2 q = abs(p - f.xy);
+		float r = round_k * f.w;
+		float2 d = q - (f.zw - r);
+		float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
+		return saturate(0.5 - dist);
+	}
+	float2 e2 = (p - f.xy) / max(f.zw, 1.0);
+	if (mode < 1.5) { // FACE PIXEL
+		float e = shape > 0.5 ? pow(max(abs(e2.x), abs(e2.y)), 2.0) : dot(e2, e2);
+		return saturate((1.0 - e) / max(0.02, feather * 0.5));
+	}
+	float e = dot(e2, e2); // NEWS BLUR: solid inside, fading out past the edge
+	return saturate((1.0 + soften - e) / max(0.05, soften * 1.4 + 0.1));
+}
+
+// blocks of `b` pixels on a grid starting at `o` (pinned to the face so they don't crawl)
+float4 pixelate(float2 p, float2 o, float b)
+{
+	float2 c = o + (floor((p - o) / b) + 0.5) * b;
+	float4 s = float4(0.0, 0.0, 0.0, 0.0);
+	for (int j = 0; j < 2; j++) {
+		for (int i = 0; i < 2; i++)
+			s += image.SampleLevel(lin, (c + (float2(i, j) - 0.5) * 0.5 * b) / size, 0.0);
+	}
+	s *= 0.25;
+	if (levels >= 2.0)
+		s.rgb = round(s.rgb * (levels - 1.0)) / (levels - 1.0);
+	return s;
+}
+
+float4 PSOut(VertData v_in) : TARGET
+{
+	float4 src = image.Sample(lin, v_in.uv);
+	float2 p = v_in.uv * size;
+	if (cover > 0.5)
+		return float4(blur_tex.Sample(lin, v_in.uv).rgb, src.a);
+
+	float m = 0.0;
+	float4 top = f0; // the face covering this pixel most (its block grid)
+	if (mode > 1.5 && mode < 2.5) {
+		m = 1.0;
+	} else {
+		if (nface > 0.5) {
+			m = face_mask(f0, p);
+		}
+		if (nface > 1.5) {
+			float k = face_mask(f1, p);
+			top = k > m ? f1 : top;
+			m = max(m, k);
+		}
+		if (nface > 2.5) {
+			float k = face_mask(f2, p);
+			top = k > m ? f2 : top;
+			m = max(m, k);
+		}
+		if (nface > 3.5) {
+			float k = face_mask(f3, p);
+			top = k > m ? f3 : top;
+			m = max(m, k);
+		}
+	}
+	if (m <= 0.0)
+		return src;
+
+	float4 fill;
+	if (mode < 0.5) {
+		if (style < 0.5)
+			fill = bar_color;
+		else if (style < 1.5)
+			fill = pixelate(p, float2(0.0, 0.0), max(4.0, floor(top.w / 2.5)));
+		else
+			fill = blur_tex.Sample(lin, v_in.uv);
+	} else if (mode < 1.5) {
+		fill = pixelate(p, top.xy - top.zw, block);
+	} else if (mode < 2.5) {
+		fill = pixelate(p, float2(0.0, 0.0), block);
+	} else {
+		fill = blur_tex.Sample(lin, v_in.uv);
+	}
+	return float4(lerp(src.rgb, fill.rgb, m), src.a);
+}
+
+technique Down
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSDown(v_in);
+	}
+}
+
+technique Grey
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSGrey(v_in);
+	}
+}
+
+technique BlurH
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSBlurH(v_in);
+	}
+}
+
+technique BlurV
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSBlurV(v_in);
+	}
+}
+
+technique Out
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSOut(v_in);
+	}
+}
