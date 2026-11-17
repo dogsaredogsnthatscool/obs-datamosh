@@ -1,4 +1,4 @@
-// Face Censor for OBS: engine/fx/censor.py's four modes. The faces are found on the CPU (facedetect.c); this draws the cover.
+// Face Censor for OBS: engine/fx/censor.py's four modes. The faces are found on the CPU (facetrack.c); this draws the cover.
 // Faces come in as up to four float4s in source pixels: EYE BAR (eye centre x, y, half length, half thickness),
 // the others (centre x, y, half width, half height of the oval).
 
@@ -23,6 +23,7 @@ uniform float4 f0;
 uniform float4 f1;
 uniform float4 f2;
 uniform float4 f3;
+uniform float4 roll;          // EYE BAR: each face's tilt (radians)
 uniform float dbg;           // OUT: draw what the face finder tracks (green = seen last look, orange = held), red edge = cover on
 uniform float4 t0;           // tracked boxes x0, y0, x1, y1 in source pixels
 uniform float4 t1;
@@ -97,10 +98,12 @@ float4 PSBlurV(VertData v_in) : TARGET
 }
 
 // how much of the pixel at p this face covers
-float face_mask(float4 f, float2 p)
+float face_mask(float4 f, float a, float2 p)
 {
-	if (mode < 0.5) { // EYE BAR: a rounded box, 1px anti-aliased edge
-		float2 q = abs(p - f.xy);
+	if (mode < 0.5) { // EYE BAR: a rounded box along the eye line, 1px anti-aliased edge
+		float2 rp = p - f.xy;
+		float ca = cos(a), sa = sin(a);
+		float2 q = abs(float2(rp.x * ca + rp.y * sa, -rp.x * sa + rp.y * ca));
 		float r = round_k * f.w;
 		float2 d = q - (f.zw - r);
 		float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
@@ -143,20 +146,20 @@ float4 censor_px(VertData v_in)
 		m = 1.0;
 	} else {
 		if (nface > 0.5) {
-			m = face_mask(f0, p);
+			m = face_mask(f0, roll.x, p);
 		}
 		if (nface > 1.5) {
-			float k = face_mask(f1, p);
+			float k = face_mask(f1, roll.y, p);
 			top = k > m ? f1 : top;
 			m = max(m, k);
 		}
 		if (nface > 2.5) {
-			float k = face_mask(f2, p);
+			float k = face_mask(f2, roll.z, p);
 			top = k > m ? f2 : top;
 			m = max(m, k);
 		}
 		if (nface > 3.5) {
-			float k = face_mask(f3, p);
+			float k = face_mask(f3, roll.w, p);
 			top = k > m ? f3 : top;
 			m = max(m, k);
 		}

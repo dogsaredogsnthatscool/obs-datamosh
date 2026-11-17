@@ -7,7 +7,7 @@ A datamosh video filter for OBS Studio on Windows. Instead of updating to the ne
 
 The same download also adds **Point Cloud**: you as thousands of glowing dots in 3D, slowly orbiting, with dust breaking off where you move. It needs no depth camera and no AI model, just a normal webcam. See [Point Cloud](#point-cloud) below.
 
-And **Face Censor** (an eye bar, pixelated face or news-style blur that follows faces live), **Face Sticker** (a smiley, sunglasses, heart eyes or your own PNG pinned to your face) and **Rainbow Trail** (rainbow copies of you trailing behind as you move), again with no AI model. See [Face Censor](#face-censor), [Face Sticker](#face-sticker) and [Rainbow Trail](#rainbow-trail) below.
+And four face filters: **Face Censor** (an eye bar, pixelated face or news-style blur that follows faces live), **Face Sticker** (a smiley, sunglasses, heart eyes or your own PNG pinned to your face), **Laser Eyes** (beams out of your eyes that aim where your head points) and **Rainbow Trail** (rainbow copies of you trailing behind as you move). See [Face Censor](#face-censor), [Face Sticker](#face-sticker), [Laser Eyes](#laser-eyes) and [Rainbow Trail](#rainbow-trail) below.
 
 ## Requirements
 
@@ -93,7 +93,7 @@ Lighter on the computer: raise **Dot spacing**, set **Dot size** to 1 or less, *
 
 Covers faces live, four ways: **Eye bar** (the classic black bar across the eyes), **Face pixel** (blocks over the face, pinned to it so they don't crawl), **Pixelate** (the whole picture) and **News blur** (a soft blurred oval). Add it the same way: **Filters** → **+** → **Face Censor**, then pick a **Mode**; only that mode's sliders show.
 
-Faces are found on the CPU in a background thread with OpenCV's small LBP face finder, built into the DLL: no AI model, no download. Up to four faces at once.
+Faces are found on the CPU in a background thread by **YuNet**, a small face detector (about 230 KB, built into the DLL: nothing to download or install) that also finds the eyes, nose and mouth. It looks up to 20 times a second, about a third of one CPU core. Up to four faces at once.
 
 | Slider | What it does | Default |
 |---|---|---|
@@ -108,7 +108,7 @@ Faces are found on the CPU in a background thread with OpenCV's small LBP face f
 | **Blur the whole picture while no face is found** | The safe option for streaming: nothing shows uncovered | off |
 | **Debug** | Outlines each face it's tracking (green = seen on the last look, orange = held after a miss), puts a red edge on the picture while the whole-picture blur is on, and writes the face finder's status to the OBS log every 2 seconds | off |
 
-It finds faces looking roughly at the camera. A face turned well away or in profile is missed: **Keep covering** bridges short turns, and **Blur the whole picture while no face is found** covers the rest. Eye bar places the bar from the face box, so it does not tilt with your head.
+It finds faces turned partly away too, but not a full profile or the back of a head: **Keep covering** bridges short turns, and **Blur the whole picture while no face is found** covers the rest. Eye bar sits on your eyes and tilts with your head.
 
 Reporting a Face Censor problem: tick **Debug**, reproduce the problem for 10 seconds or so, then in OBS choose **Help → Log Files → Upload Current Log File** and send the link (lines start with `[face censor]`). A screenshot with the outlines showing helps too.
 
@@ -124,6 +124,23 @@ Pins a sticker to every face: **Smiley**, **Sunglasses**, **Heart eyes**, or **Y
 | **Opacity** | See-through | 1 |
 | **Steady** | Holds a still face's sticker still; fast moves pass straight through | 0.6 |
 | **Keep showing after a face is lost** | Seconds it stays put (then fades) when the finder misses a frame | 0.5 |
+
+## Laser Eyes
+
+Beams shoot out of both eyes the way your head points, with a white-hot core and a flicker. Facing the camera they come straight at you (a bright flare); turn your head and they swing out to full length. Add it with **Filters** → **+** → **Laser Eyes**. Up to four faces at once.
+
+Which way your head points is worked out from your eyes and nose with a small 3D face model (head direction, not where your pupils look). **Auto level** learns your own straight-ahead in the first couple of seconds, so face the camera when you turn it on.
+
+| Slider | What it does | Default |
+|---|---|---|
+| **Aim where I look** | Off: the beams go at a fixed **Aim** angle instead | on |
+| **Length** | Beam length, in picture heights | 1.25 |
+| **Width** | Beam width (pixels at 720p, scales with the picture) | 9 |
+| **Colour** | Beam colour | red |
+| **Aim sensitivity** | Exaggerate (above 1) or calm (below 1) how far the beams swing | 1 |
+| **Steady** | Smooths the aim; fast head turns still pass straight through | 0.5 |
+| **Auto level** | Learns your natural head angle as straight ahead | on |
+| **Keep firing after a face is lost** | Seconds the beams stay when the finder misses a frame | 0.5 |
 
 ## Rainbow Trail
 
@@ -165,12 +182,12 @@ Cross-compiles from Linux with zig, so you don't need Visual Studio:
 ZIG=zig OBS_SRC=path/to/obs-studio ./build.sh
 ```
 
-Needs [zig](https://ziglang.org) 0.14 and an obs-studio source tree (only the `libobs/` headers are used). Output: `dist/datamosh-filter.dll` (all five filters). `./build.sh linux` with `OBS_LIB=` also builds a `.so` for testing in Linux OBS.
+Needs [zig](https://ziglang.org) 0.14 and an obs-studio source tree (only the `libobs/` headers are used). Output: `dist/datamosh-filter.dll` (all six filters). `./build.sh linux` with `OBS_LIB=` also builds a `.so` for testing in Linux OBS.
 
 The shader is in [`src/mosh.effect`](src/mosh.effect): block-matched motion between frames drags a buffer of old frames along, and the real picture leaks back in at the Refresh rate.
 
-`test/run.sh` plays raw RGBA frames through a filter inside libobs without the OBS window and saves chosen output frames (Linux, needs Xvfb): how the Point Cloud, Face Censor, Face Sticker and Rainbow Trail filters were checked.
+`test/run.sh` plays raw RGBA frames through a filter inside libobs without the OBS window and saves chosen output frames (Linux, needs Xvfb): how the Point Cloud, Face Censor, Face Sticker, Laser Eyes and Rainbow Trail filters were checked.
 
 ## License
 
-GPL-2.0-or-later, like OBS itself. The face finder data ([`data/lbpcascade_frontalface_opencv.xml`](data/)) is OpenCV's, under its BSD-style license (see [`data/README.md`](data/README.md)).
+GPL-2.0-or-later, like OBS itself. The face detector ([`data/face_detection_yunet_2023mar.onnx`](data/), YuNet from the OpenCV Zoo) is MIT-licensed (see [`data/README.md`](data/README.md)).

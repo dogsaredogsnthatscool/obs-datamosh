@@ -1,7 +1,6 @@
 // Face Censor filter for OBS: moshcap's engine/fx/censor.py (EYE BAR, FACE PIXEL, PIXELATE, NEWS BLUR) for a plain webcam.
-// Each frame the GPU makes a small grey copy; it is read back a frame late and handed to a worker thread that finds the
-// faces (facedetect.c, OpenCV's LBP face cascade, no model files), so the render thread never waits on it. Found faces
-// are tracked (held for a moment when the finder misses one), smoothed with the engine's speed-aware STEADY, and drawn.
+// Faces (with eyes) come from the shared tracker (facetrack.c: YuNet on a worker thread, so the render thread never waits),
+// held for a moment when the finder misses one and smoothed with the engine's speed-aware STEADY; the GPU draws the cover.
 
 #include <obs-module.h>
 #include <util/platform.h>
@@ -13,7 +12,7 @@
 #include "censor-effect.h" // CENSOR_EFFECT: src/censor.effect as a string, made by build.sh
 #include "facetrack.h"
 
-#define CENSOR_VERSION "1.3.0-beta"
+#define CENSOR_VERSION "1.4.0-beta"
 
 #define MAX_FACES FT_MAX
 
@@ -305,7 +304,7 @@ static void censor_render(void *data, gs_effect_t *unused)
 
 	const bool whole = f->mode == 2;
 	int nf = 0;
-	float fc[MAX_FACES][4];
+	float fc[MAX_FACES][4], roll[MAX_FACES] = {0};
 	float blur_r = 0.0f;
 
 	if (!f->rendered) {
@@ -333,13 +332,17 @@ static void censor_render(void *data, gs_effect_t *unused)
 		const float x0 = t->box[0], y0 = t->box[1], x1 = t->box[2], y1 = t->box[3];
 		const float bw = x1 - x0, bh = y1 - y0, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
 		float *o = fc[nf++];
-		if (f->mode == 0) {
-			const float L = bw * 0.85f * f->length / 2.6f / 2.0f * f->size;
-			const float T = bh * 0.2f * f->thick / 0.5f / 2.0f * f->size;
-			o[0] = cx;
-			o[1] = y0 + 0.36f * bh - 2.0f * T * f->lift; // the eye line of the stretched box; + lifts the bar
+		if (f->mode == 0) { // censor.py _eyebar: on the eye line, tilting with the head
+			float ux = t->re[0] - t->le[0], uy = t->re[1] - t->le[1];
+			const float d = fmaxf(8.0f, sqrtf(ux * ux + uy * uy));
+			ux /= d, uy /= d;
+			float L = fmaxf(d * f->length, bw * 0.85f * f->length / 2.6f) / 2.0f * f->size;
+			float T = fmaxf(d * f->thick, bh * 0.2f * f->thick / 0.5f) / 2.0f * f->size;
+			o[0] = (t->le[0] + t->re[0]) / 2 + uy * T * 2.0f * f->lift; // + lifts the bar (along the face's up)
+			o[1] = (t->le[1] + t->re[1]) / 2 - ux * T * 2.0f * f->lift;
 			o[2] = L;
 			o[3] = T;
+			roll[nf - 1] = atan2f(uy, ux);
 			if (f->style == 2)
 				blur_r = fmaxf(blur_r, fmaxf(6.0f, T * 1.6f)); // twice the engine's: at webcam sizes its blur left the eyes readable
 		} else {
@@ -400,6 +403,7 @@ static void censor_render(void *data, gs_effect_t *unused)
 	}
 	set_vec4(f, "tst", tst[0], tst[1], tst[2], tst[3]);
 	set_float(f, "nface", (float)nf);
+	set_vec4(f, "roll", roll[0], roll[1], roll[2], roll[3]);
 	static const char *fn[MAX_FACES] = {"f0", "f1", "f2", "f3"};
 	for (int i = 0; i < MAX_FACES; i++)
 		set_vec4(f, fn[i], i < nf ? fc[i][0] : 0, i < nf ? fc[i][1] : 0, i < nf ? fc[i][2] : 1, i < nf ? fc[i][3] : 1);

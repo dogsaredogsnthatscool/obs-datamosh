@@ -11,7 +11,7 @@
 #include "sticker-effect.h" // STICKER_EFFECT: src/sticker.effect as a string, made by build.sh
 #include "facetrack.h"
 
-#define STICKER_VERSION "1.3.0-beta"
+#define STICKER_VERSION "1.4.0-beta"
 
 enum { K_SMILEY, K_GLASSES, K_HEARTS, K_IMAGE };
 
@@ -223,9 +223,11 @@ static void sticker_render(void *data, gs_effect_t *unused)
 			continue;
 		const float bw = t->box[2] - t->box[0], bh = t->box[3] - t->box[1];
 		float cx = (t->box[0] + t->box[2]) / 2, cy = (t->box[1] + t->box[3]) / 2, sw, sh;
-		if (f->kind == K_GLASSES || f->kind == K_HEARTS) {
-			cy = t->box[1] + 0.36f * bh; // the eye line
-			sw = bw * (f->kind == K_GLASSES ? 1.15f : 0.95f) * f->size;
+		if (f->kind == K_GLASSES || f->kind == K_HEARTS) { // on the eyes, sized from the eye distance
+			const float d = fmaxf(8.0f, hypotf(t->re[0] - t->le[0], t->re[1] - t->le[1]));
+			cx = (t->le[0] + t->re[0]) / 2;
+			cy = (t->le[1] + t->re[1]) / 2;
+			sw = fmaxf(d * (f->kind == K_GLASSES ? 2.35f : 2.0f), bw * 0.6f) * f->size;
 			sh = sw / (f->kind == K_GLASSES ? 2.6f : 2.2f);
 		} else {
 			sw = bw * (own ? 1.3f : 1.25f) * f->size;

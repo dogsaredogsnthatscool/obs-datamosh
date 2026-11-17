@@ -296,6 +296,7 @@ extern struct obs_source_info pointcloud_filter; // pointcloud-filter.c
 extern struct obs_source_info censor_filter;     // censor-filter.c
 extern struct obs_source_info sticker_filter;    // sticker-filter.c
 extern struct obs_source_info trail_filter;      // trail-filter.c
+extern struct obs_source_info lasers_filter;     // lasers-filter.c
 
 bool obs_module_load(void)
 {
@@ -304,5 +305,6 @@ bool obs_module_load(void)
 	obs_register_source(&censor_filter);
 	obs_register_source(&sticker_filter);
 	obs_register_source(&trail_filter);
+	obs_register_source(&lasers_filter);
 	return true;
 }

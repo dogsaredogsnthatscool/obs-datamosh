@@ -1,0 +1,89 @@
+// Laser Eyes for OBS: engine/fx/lasereyes.py. Beams out of both eyes the way the head points, a white-hot core, a
+// flicker; facing the camera they come straight at you (short, with a big flare). Up to four faces:
+// eN = eye on the picture's left (x, y), right (x, y); aN = beam direction (x, y), how much it crosses the picture, eye distance.
+
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform float2 size;
+uniform float4 color;
+uniform float len;           // beam length in pixels (before foreshortening)
+uniform float width;         // beam width in pixels, flicker included
+uniform float nface;
+uniform float4 e0;
+uniform float4 e1;
+uniform float4 e2;
+uniform float4 e3;
+uniform float4 a0;
+uniform float4 a1;
+uniform float4 a2;
+uniform float4 a3;
+
+sampler_state lin {
+	Filter = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+	return vert_out;
+}
+
+// glow (x) and core (y) of one eye's beam at pixel p
+float2 beam(float2 eye, float4 a, float2 p)
+{
+	float fore = a.z;
+	float L = max(1.0, len * fore);
+	float flare = a.w * (0.35 + 0.45 * (1.0 - fore));
+	float wide = 1.0 + (1.0 - fore) * 1.5;
+	float2 d = p - eye;
+	float t = dot(d, a.xy);
+	float n = abs(d.x * -a.y + d.y * a.x);
+	float r2 = dot(d, d);
+	float on = (t > 0.0 && t < L) ? pow(saturate(1.0 - t / L), 0.3) : 0.0;
+	float gw = n / (width * 2.2 * wide), cw = n / (width * 0.45 * wide);
+	float glow = exp(-gw * gw) * on + exp(-r2 / (flare * flare)) * 1.2;
+	float fc = flare * 0.35;
+	float core = exp(-cw * cw) * on + exp(-r2 / (fc * fc)) * (1.0 - fore);
+	return float2(glow, core);
+}
+
+float2 face(float4 e, float4 a, float2 p)
+{
+	return beam(e.xy, a, p) + beam(e.zw, a, p);
+}
+
+float4 PSOut(VertData v_in) : TARGET
+{
+	float4 x = image.Sample(lin, v_in.uv);
+	float2 p = v_in.uv * size;
+	float2 s = float2(0.0, 0.0);
+	if (nface > 0.5)
+		s += face(e0, a0, p);
+	if (nface > 1.5)
+		s += face(e1, a1, p);
+	if (nface > 2.5)
+		s += face(e2, a2, p);
+	if (nface > 3.5)
+		s += face(e3, a3, p);
+	float3 c = x.rgb + color.rgb * min(s.x, 1.5) + saturate(s.y);
+	float k = saturate(max(s.x, s.y)); // the beams show over a transparent background too
+	return float4(saturate(c), max(x.a, k));
+}
+
+technique Out
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSOut(v_in);
+	}
+}
