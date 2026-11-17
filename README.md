@@ -7,7 +7,7 @@ A datamosh video filter for OBS Studio on Windows. Instead of updating to the ne
 
 The same download also adds **Point Cloud**: you as thousands of glowing dots in 3D, slowly orbiting, with dust breaking off where you move. It needs no depth camera and no AI model, just a normal webcam. See [Point Cloud](#point-cloud) below.
 
-And **Face Censor**: an eye bar, pixelated face or news-style blur that follows faces live, again with no AI model. See [Face Censor](#face-censor) below.
+And **Face Censor** (an eye bar, pixelated face or news-style blur that follows faces live), **Face Sticker** (a smiley, sunglasses, heart eyes or your own PNG pinned to your face) and **Rainbow Trail** (rainbow copies of you trailing behind as you move), again with no AI model. See [Face Censor](#face-censor), [Face Sticker](#face-sticker) and [Rainbow Trail](#rainbow-trail) below.
 
 ## Requirements
 
@@ -112,6 +112,35 @@ It finds faces looking roughly at the camera. A face turned well away or in prof
 
 Reporting a Face Censor problem: tick **Debug**, reproduce the problem for 10 seconds or so, then in OBS choose **Help → Log Files → Upload Current Log File** and send the link (lines start with `[face censor]`). A screenshot with the outlines showing helps too.
 
+## Face Sticker
+
+Pins a sticker to every face: **Smiley**, **Sunglasses**, **Heart eyes**, or **Your own image** (any PNG with transparency, JPG, or an animated GIF). Add it with **Filters** → **+** → **Face Sticker**. It uses the same face finder as Face Censor, so it follows faces looking roughly at the camera, up to four at once.
+
+| Slider | What it does | Default |
+|---|---|---|
+| **Sticker** / **Image** | Which sticker; pick a file for Your own image | Smiley |
+| **Size** | Scales the sticker | 1 |
+| **Move left / right**, **Move up / down** | Nudges it, in face widths / heights (e.g. up 0.9 for a hat or crown) | 0 |
+| **Opacity** | See-through | 1 |
+| **Steady** | Holds a still face's sticker still; fast moves pass straight through | 0.6 |
+| **Keep showing after a face is lost** | Seconds it stays put (then fades) when the finder misses a frame | 0.5 |
+
+## Rainbow Trail
+
+Your past outlines trail behind you in rainbow colours: **Solid**, neon **Outline**, **Glow**, or **Real** frozen copies of you. Add it with **Filters** → **+** → **Rainbow Trail**, then choose where your outline comes from:
+
+- **Movement** (no setup): whatever moves leaves the trail. Quick to try; a still body leaves nothing.
+- **Transparency**: the cleanest look. Put a Chroma Key (green screen) or a background-removal filter *above* Rainbow Trail in the filter list; the trail is drawn where the background was removed.
+- **Learned empty room**: step out of the picture, click **Learn background**, step back in. Anything that differs from the room is you. Works best with a fixed camera and steady lighting; raise **Sensitivity** if bits of the room show up.
+
+| Slider | What it does | Default |
+|---|---|---|
+| **Ghosts** | How many copies | 6 |
+| **Frames apart** | Gap between copies (more = longer trail) | 3 |
+| **Fade** | How fast older copies fade | 0.85 |
+| **Edge softness** | Soft or hard outlines | 0.35 |
+| **Colour** / **Rainbow spread** / **Colour spin** | Starting hue, how much of the rainbow the trail spans, how fast it cycles | 0 / 1 / 0.25 |
+
 ## Good to know
 
 - Areas of flat, single colour don't move. There's nothing in them to track, so texture and edges smear best.
@@ -136,11 +165,11 @@ Cross-compiles from Linux with zig, so you don't need Visual Studio:
 ZIG=zig OBS_SRC=path/to/obs-studio ./build.sh
 ```
 
-Needs [zig](https://ziglang.org) 0.14 and an obs-studio source tree (only the `libobs/` headers are used). Output: `dist/datamosh-filter.dll` (all three filters). `./build.sh linux` with `OBS_LIB=` also builds a `.so` for testing in Linux OBS.
+Needs [zig](https://ziglang.org) 0.14 and an obs-studio source tree (only the `libobs/` headers are used). Output: `dist/datamosh-filter.dll` (all five filters). `./build.sh linux` with `OBS_LIB=` also builds a `.so` for testing in Linux OBS.
 
 The shader is in [`src/mosh.effect`](src/mosh.effect): block-matched motion between frames drags a buffer of old frames along, and the real picture leaks back in at the Refresh rate.
 
-`test/run.sh` plays raw RGBA frames through a filter inside libobs without the OBS window and saves chosen output frames (Linux, needs Xvfb): how the Point Cloud and Face Censor filters were checked.
+`test/run.sh` plays raw RGBA frames through a filter inside libobs without the OBS window and saves chosen output frames (Linux, needs Xvfb): how the Point Cloud, Face Censor, Face Sticker and Rainbow Trail filters were checked.
 
 ## License
 

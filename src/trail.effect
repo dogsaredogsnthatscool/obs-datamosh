@@ -1,0 +1,125 @@
+// Rainbow Trail for OBS: moshcap's TIME > RAINBOW TRAIL (engine/fx/time.py) without the engine's person matte. Your
+// silhouette comes from the picture's transparency (a chroma key / background removal filter above this one), from what
+// differs from a learned empty room, or from movement. Snapshots are kept at quarter size: rgb = picture, a = silhouette.
+
+uniform float4x4 ViewProj;
+uniform texture2d image;     // SMALL: source. GHOST: a stored snapshot. OUT: source
+uniform texture2d prev_tex;  // SMALL: last snapshot (movement) or the learned room. OUT: the painted trail
+uniform texture2d now_tex;   // OUT: this frame's snapshot (your silhouette now)
+uniform float2 cell;         // SMALL: one snapshot texel in source uv
+uniform float2 texel;        // GHOST: 1 / snapshot size
+uniform float from;          // 0 movement, 1 transparency, 2 learned room
+uniform float has_prev;      // SMALL: prev_tex holds something to compare with
+uniform float tol;           // SMALL: how different counts as "you"
+uniform float4 color;        // GHOST: rgb + strength (FADE^i)
+uniform float style;         // 0 solid, 1 outline, 2 glow, 3 real
+uniform float soft;          // GHOST: edge softness
+
+sampler_state lin {
+	Filter = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+	return vert_out;
+}
+
+// the snapshot: the source averaged over each cell, and the silhouette in alpha
+float4 PSSmall(VertData v_in) : TARGET
+{
+	float4 s = float4(0.0, 0.0, 0.0, 0.0);
+	for (int j = 0; j < 4; j++) {
+		for (int i = 0; i < 4; i++)
+			s += image.SampleLevel(lin, v_in.uv + (float2(i, j) - 1.5) * 0.25 * cell, 0.0);
+	}
+	s /= 16.0;
+	float m;
+	if (from > 0.5 && from < 1.5) {
+		m = s.a;
+	} else if (has_prev > 0.5) {
+		float3 d = abs(s.rgb - prev_tex.SampleLevel(lin, v_in.uv, 0.0).rgb);
+		m = smoothstep(tol, tol * 2.5, d.r + d.g + d.b);
+	} else {
+		m = 0.0;
+	}
+	return float4(s.rgb, m);
+}
+
+// one ghost, its strength and colour in `color`; drawn with blending onto the trail, oldest first
+float4 PSGhost(VertData v_in) : TARGET
+{
+	float2 uv = v_in.uv;
+	float a = image.SampleLevel(lin, uv, 0.0).a;
+	float r = 0.5 + soft * 3.0;
+	float sum = a, hi = a, lo = a;
+	for (int j = -1; j <= 1; j++) {
+		for (int i = -1; i <= 1; i++) {
+			if (i == 0 && j == 0)
+				continue;
+			float b = image.SampleLevel(lin, uv + float2(i, j) * r * texel, 0.0).a;
+			sum += b;
+			hi = max(hi, b);
+			lo = min(lo, b);
+		}
+	}
+	a = soft > 0.0 ? sum / 9.0 : a;
+	if (style > 0.5 && style < 1.5)
+		a = saturate((hi - lo) * 1.6); // outline: the ring between the grown and shrunk silhouette
+	a = saturate(a) * color.a;
+	float3 c = style > 2.5 ? image.SampleLevel(lin, uv, 0.0).rgb : color.rgb;
+	if (style > 1.5 && style < 2.5)
+		return float4(c * a * 0.6, a); // glow: light adds up (blend ONE, ONE)
+	return float4(c, a);                   // over (blend SRCALPHA, INVSRCALPHA); the trail stays premultiplied
+}
+
+float4 PSOut(VertData v_in) : TARGET
+{
+	float4 x = image.Sample(lin, v_in.uv);
+	float4 tr = prev_tex.Sample(lin, v_in.uv); // the trail, premultiplied
+	bool glow = style > 1.5 && style < 2.5;
+	if (from > 0.5 && from < 1.5) {            // you, already cut out by a filter above, in front of the trail
+		float3 pm = x.rgb * x.a + tr.rgb * (1.0 - x.a);
+		float a = saturate(x.a + min(tr.a, 1.0) * (1.0 - x.a));
+		return float4(pm / max(a, 1e-4), a);
+	}
+	float3 under = glow ? x.rgb + tr.rgb : tr.rgb + x.rgb * (1.0 - saturate(tr.a));
+	float you = now_tex.Sample(lin, v_in.uv).a; // you stay in front
+	return float4(lerp(saturate(under), x.rgb, you), x.a);
+}
+
+technique Small
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSSmall(v_in);
+	}
+}
+
+technique Ghost
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSGhost(v_in);
+	}
+}
+
+technique Out
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSOut(v_in);
+	}
+}
