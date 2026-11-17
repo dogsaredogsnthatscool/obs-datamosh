@@ -23,6 +23,12 @@ uniform float4 f0;
 uniform float4 f1;
 uniform float4 f2;
 uniform float4 f3;
+uniform float dbg;           // OUT: draw what the face finder tracks (green = seen last look, orange = held), red edge = cover on
+uniform float4 t0;           // tracked boxes x0, y0, x1, y1 in source pixels
+uniform float4 t1;
+uniform float4 t2;
+uniform float4 t3;
+uniform float4 tst;          // per track: 0 none, 1 seen, 2 held
 
 sampler_state lin {
 	Filter = Linear;
@@ -124,7 +130,7 @@ float4 pixelate(float2 p, float2 o, float b)
 	return s;
 }
 
-float4 PSOut(VertData v_in) : TARGET
+float4 censor_px(VertData v_in)
 {
 	float4 src = image.Sample(lin, v_in.uv);
 	float2 p = v_in.uv * size;
@@ -174,6 +180,34 @@ float4 PSOut(VertData v_in) : TARGET
 		fill = blur_tex.Sample(lin, v_in.uv);
 	}
 	return float4(lerp(src.rgb, fill.rgb, m), src.a);
+}
+
+// 1 on a 3px outline of box b (state st > 0)
+float outline(float4 b, float st, float2 p)
+{
+	if (st < 0.5)
+		return 0.0;
+	float2 lo = p - b.xy, hi = b.zw - p;
+	float inside = step(0.0, min(min(lo.x, lo.y), min(hi.x, hi.y)));
+	float edge = 1.0 - step(3.0, min(min(lo.x, lo.y), min(hi.x, hi.y)));
+	return inside * edge;
+}
+
+float4 PSOut(VertData v_in) : TARGET
+{
+	float4 c = censor_px(v_in);
+	if (dbg < 0.5)
+		return c;
+	float2 p = v_in.uv * size;
+	float3 green = float3(0.1, 1.0, 0.2), orange = float3(1.0, 0.55, 0.0);
+	c.rgb = lerp(c.rgb, tst.x > 1.5 ? orange : green, outline(t0, tst.x, p));
+	c.rgb = lerp(c.rgb, tst.y > 1.5 ? orange : green, outline(t1, tst.y, p));
+	c.rgb = lerp(c.rgb, tst.z > 1.5 ? orange : green, outline(t2, tst.z, p));
+	c.rgb = lerp(c.rgb, tst.w > 1.5 ? orange : green, outline(t3, tst.w, p));
+	float2 e = min(p, size - p);
+	if (cover > 0.5 && min(e.x, e.y) < 8.0)
+		c.rgb = float3(1.0, 0.1, 0.1);
+	return c;
 }
 
 technique Down

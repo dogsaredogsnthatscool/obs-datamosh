@@ -28,7 +28,7 @@ for c in "${SRCS[@]}"; do
 done
 OBJS=("${SRCS[@]/#/$B/}"); OBJS=("${OBJS[@]/%/.obj}")
 { echo "LIBRARY obs.dll"; echo "EXPORTS"
-  nm -u "${OBJS[@]}" | awk '{print $2}' | grep -E '^(obs_|gs_|b(z|m)alloc|bfree|blog|vec)' | sort -u ; } > "$B/obs.def"
+  nm -u "${OBJS[@]}" | awk '{print $2}' | grep -E '^(obs_|gs_|os_|b(z|m)alloc|bfree|blog|vec)' | sort -u ; } > "$B/obs.def"
 "$ZIG" dlltool -d "$B/obs.def" -l "$B/libobs.a" -m i386:x86-64
 "$ZIG" cc -target x86_64-windows-gnu -shared -o dist/datamosh-filter.dll "${OBJS[@]}" "$B/libobs.a" \
 	-Wl,--export-all-symbols -s
