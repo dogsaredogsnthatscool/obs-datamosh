@@ -293,10 +293,12 @@ static struct obs_source_info mosh_filter = {
 };
 
 extern struct obs_source_info pointcloud_filter; // pointcloud-filter.c
+extern struct obs_source_info censor_filter;     // censor-filter.c
 
 bool obs_module_load(void)
 {
 	obs_register_source(&mosh_filter);
 	obs_register_source(&pointcloud_filter);
+	obs_register_source(&censor_filter);
 	return true;
 }
