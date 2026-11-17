@@ -1,0 +1,161 @@
+// Face Sticker for OBS: a picture pinned to each tracked face. The built-in stickers are drawn here from shapes (sharp at
+// any size, nothing to install); "your own image" samples the loaded PNG/GIF. Faces come in as up to four float4 rects
+// (x0, y0, x1, y1 in source pixels) with a fade each.
+
+uniform float4x4 ViewProj;
+uniform texture2d image;     // the source
+uniform texture2d sticker;   // your own image
+uniform float2 size;         // source size in pixels
+uniform float kind;          // 0 smiley, 1 sunglasses, 2 heart eyes, 3 your own image
+uniform float opacity;
+uniform float nface;
+uniform float4 s0;
+uniform float4 s1;
+uniform float4 s2;
+uniform float4 s3;
+uniform float4 fade;         // per face 0..1
+
+sampler_state lin {
+	Filter = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+	return vert_out;
+}
+
+// coverage of a shape with signed distance d (negative inside), aa = half a pixel in the same units
+float fill(float d, float aa)
+{
+	return saturate(0.5 - d / aa);
+}
+
+float sd_box(float2 p, float2 b, float r)
+{
+	float2 q = abs(p) - b + r;
+	return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+// paint colour c with coverage a over the sticker so far
+float4 over(float4 dst, float3 c, float a)
+{
+	return float4(lerp(dst.rgb, c, a), max(dst.a, a));
+}
+
+float4 smiley(float2 uv, float aa)
+{
+	float4 o = float4(0.0, 0.0, 0.0, 0.0);
+	float2 p = uv - 0.5;
+	float r = length(p);
+	o = over(o, float3(0.18, 0.11, 0.02), fill(r - 0.48, aa));                     // outline
+	o = over(o, float3(1.0, 0.82, 0.18), fill(r - 0.455, aa));                     // face
+	o = over(o, float3(1.0, 0.9, 0.45), fill(length(p - float2(-0.12, -0.16)) - 0.22, aa) * 0.35); // soft highlight
+	float3 ink = float3(0.25, 0.14, 0.03);
+	o = over(o, ink, fill(length((p - float2(-0.15, -0.1)) * float2(1.0, 0.62)) - 0.055, aa)); // eyes
+	o = over(o, ink, fill(length((p - float2(0.15, -0.1)) * float2(1.0, 0.62)) - 0.055, aa));
+	float arc = abs(length(p - float2(0.0, -0.02)) - 0.28) - 0.03;                 // smile: a ring, lower part only
+	o = over(o, ink, fill(max(arc, 0.06 - p.y), aa));
+	o = over(o, float3(1.0, 0.55, 0.45), fill(length(p - float2(-0.29, 0.1)) - 0.065, aa) * 0.45); // cheeks
+	o = over(o, float3(1.0, 0.55, 0.45), fill(length(p - float2(0.29, 0.1)) - 0.065, aa) * 0.45);
+	return o;
+}
+
+float4 sunglasses(float2 uv, float aa)
+{
+	// uv.x 0..1 across, y 0..1 down; the rect is 2.6 times wider than tall, so work in units of its height
+	float2 p = float2((uv.x - 0.5) * 2.6, uv.y - 0.5);
+	float4 o = float4(0.0, 0.0, 0.0, 0.0);
+	float3 frame = float3(0.03, 0.03, 0.04);
+	float lens_l = sd_box(p - float2(-0.62, 0.06), float2(0.5, 0.36), 0.22);
+	float lens_r = sd_box(p - float2(0.62, 0.06), float2(0.5, 0.36), 0.22);
+	float bar = sd_box(p - float2(0.0, -0.28), float2(1.25, 0.07), 0.05);
+	o = over(o, frame, fill(min(min(lens_l, lens_r), bar) - 0.05, aa));
+	float3 glass = lerp(float3(0.12, 0.1, 0.2), float3(0.02, 0.02, 0.05), uv.y);
+	o = over(o, glass, fill(min(lens_l, lens_r) + 0.02, aa));
+	float glint = abs((p.x + p.y * 0.8) - (-0.85)) - 0.05;                          // a shine across each lens
+	float glint2 = abs((p.x + p.y * 0.8) - 0.4) - 0.05;
+	float shine = fill(min(glint, glint2), aa) * fill(min(lens_l, lens_r) + 0.06, aa);
+	o = over(o, float3(1.0, 1.0, 1.0), shine * 0.55);
+	return o;
+}
+
+// exact distance to a heart (tip at 0, top lobes up to about 1.2, y up)
+float sd_heart(float2 p)
+{
+	p.x = abs(p.x);
+	if (p.x + p.y > 1.0)
+		return length(p - float2(0.25, 0.75)) - 0.35355;
+	float t = max(p.x + p.y, 0.0) * 0.5;
+	float2 a = p - float2(0.0, 1.0), b = p - float2(t, t);
+	return sqrt(min(dot(a, a), dot(b, b))) * sign(p.x - p.y);
+}
+
+float4 heart_eyes(float2 uv, float aa)
+{
+	// the rect is 2.2 wide per 1 tall; work in units of its height, y up; aa is a pixel in those units
+	float4 o = float4(0.0, 0.0, 0.0, 0.0);
+	for (int e = 0; e < 2; e++) {
+		float2 q = float2((uv.x - 0.5) * 2.2 - (e == 0 ? -0.52 : 0.52), 0.92 - uv.y);
+		float d = sd_heart(q / 0.72) * 0.72;
+		o = over(o, float3(0.45, 0.0, 0.06), fill(d, aa));
+		o = over(o, float3(0.95, 0.12, 0.25), fill(d + 0.035, aa));
+		o = over(o, float3(1.0, 0.75, 0.8), fill(length(q - float2(-0.17, 0.6)) - 0.07, aa) * 0.8);
+	}
+	return o;
+}
+
+float4 sticker_at(float4 rect, float2 p)
+{
+	float2 uv = (p - rect.xy) / max(rect.zw - rect.xy, 1.0);
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0)
+		return float4(0.0, 0.0, 0.0, 0.0);
+	float aa = 1.0 / max(rect.z - rect.x, 1.0); // half a pixel, about, in uv across
+	if (kind < 0.5)
+		return smiley(uv, aa);
+	if (kind < 1.5)
+		return sunglasses(uv, aa * 2.6);
+	if (kind < 2.5)
+		return heart_eyes(uv, aa * 2.2);
+	return sticker.SampleLevel(lin, uv, 0.0);
+}
+
+float4 put(float4 c, float4 rect, float f, float2 p)
+{
+	float4 s = sticker_at(rect, p);
+	float a = s.a * opacity * f;
+	return float4(lerp(c.rgb, s.rgb, a), max(c.a, a));
+}
+
+float4 PSOut(VertData v_in) : TARGET
+{
+	float4 c = image.Sample(lin, v_in.uv);
+	float2 p = v_in.uv * size;
+	if (nface > 0.5)
+		c = put(c, s0, fade.x, p);
+	if (nface > 1.5)
+		c = put(c, s1, fade.y, p);
+	if (nface > 2.5)
+		c = put(c, s2, fade.z, p);
+	if (nface > 3.5)
+		c = put(c, s3, fade.w, p);
+	return c;
+}
+
+technique Out
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSOut(v_in);
+	}
+}

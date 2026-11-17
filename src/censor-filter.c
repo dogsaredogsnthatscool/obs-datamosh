@@ -11,200 +11,31 @@
 #include <string.h>
 
 #include "censor-effect.h" // CENSOR_EFFECT: src/censor.effect as a string, made by build.sh
-#include "facedetect.h"
+#include "facetrack.h"
 
-#define CENSOR_VERSION "1.2.1-beta"
+#define CENSOR_VERSION "1.3.0-beta"
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-typedef SRWLOCK lock_t;
-typedef CONDITION_VARIABLE cond_t;
-#define lock_init(l) InitializeSRWLock(l)
-#define lock(l) AcquireSRWLockExclusive(l)
-#define unlock(l) ReleaseSRWLockExclusive(l)
-#define cond_init(c) InitializeConditionVariable(c)
-#define cond_wait(c, l) SleepConditionVariableSRW(c, l, INFINITE, 0)
-#define cond_signal(c) WakeConditionVariable(c)
-#else
-#include <pthread.h>
-typedef pthread_mutex_t lock_t;
-typedef pthread_cond_t cond_t;
-#define lock_init(l) pthread_mutex_init(l, NULL)
-#define lock(l) pthread_mutex_lock(l)
-#define unlock(l) pthread_mutex_unlock(l)
-#define cond_init(c) pthread_cond_init(c, NULL)
-#define cond_wait(c, l) pthread_cond_wait(c, l)
-#define cond_signal(c) pthread_cond_signal(c)
-#endif
-
-#define MAX_FACES 4
-
-// one tracked face. box = x0, y0, x1, y1 in source pixels; the follow() state is the engine's util.follow
-struct track {
-	bool on;
-	float box[4], in[4], v[4];
-	float lost; // seconds since the finder last saw it
-};
+#define MAX_FACES FT_MAX
 
 struct censor {
 	obs_source_t *ctx;
 	gs_effect_t *effect;
-	gs_texrender_t *cur, *grey, *small, *bl[2];
-	gs_stagesurf_t *stage[2];
-	uint32_t w, h, gw, gh;
-	bool rendered, stage_ok;
-	float dt;
-
-	// the worker: `job` holds a grey frame when `pending`; results land in `res` with `seq` bumped
-	lock_t lk;
-	cond_t cv;
-#ifdef _WIN32
-	HANDLE thread;
-#else
-	pthread_t thread;
-#endif
-	bool quit, pending, running;
-	uint8_t *job;
-	int jw, jh;
-	size_t jcap;
-	struct fd_rect res[MAX_FACES];
-	int nres;
-	uint32_t seq, seen_seq;
-	uint64_t runs, run_ns; // debug: finder runs and time spent (worker side, under lk)
-	int last_raw;          // debug: faces in the last finder run
-
-	struct track tr[MAX_FACES];
+	gs_texrender_t *cur, *small, *bl[2];
+	struct facetrack *ft;
+	uint32_t w, h;
+	bool rendered, rendered_log, was_cover;
+	float dt, log_t;
 
 	int mode, style, shape, levels;
 	float size, length, thick, smooth, roundc, lift, block, feather, soften, strong, hold;
 	uint32_t color;
 	bool small_faces, cover_lost, debug;
-	bool was_cover, rendered_log;
-	float log_t;
-	bool seen_now[MAX_FACES]; // debug: track matched in the latest finder result
 };
 
 static const char *censor_name(void *unused)
 {
 	UNUSED_PARAMETER(unused);
 	return "Face Censor";
-}
-
-// ---------------------------------------------------------------- the face-finding thread
-
-#ifdef _WIN32
-static DWORD WINAPI worker(LPVOID data)
-#else
-static void *worker(void *data)
-#endif
-{
-	struct censor *f = data;
-	uint8_t *buf = NULL;
-	size_t cap = 0;
-	lock(&f->lk);
-	for (;;) {
-		while (!f->pending && !f->quit)
-			cond_wait(&f->cv, &f->lk);
-		if (f->quit)
-			break;
-		const int w = f->jw, h = f->jh;
-		if ((size_t)w * h > cap) {
-			bfree(buf);
-			cap = (size_t)w * h;
-			buf = bmalloc(cap);
-		}
-		memcpy(buf, f->job, (size_t)w * h);
-		unlock(&f->lk);
-
-		struct fd_rect r[MAX_FACES];
-		const uint64_t t0 = os_gettime_ns();
-		const int n = fd_detect(buf, w, h, w, 24, r, MAX_FACES);
-		const uint64_t took = os_gettime_ns() - t0;
-
-		lock(&f->lk);
-		memcpy(f->res, r, sizeof(r));
-		f->nres = n;
-		f->seq++;
-		f->runs++;
-		f->run_ns += took;
-		f->last_raw = n;
-		f->pending = false;
-	}
-	unlock(&f->lk);
-	bfree(buf);
-	return 0;
-}
-
-// ---------------------------------------------------------------- tracking
-
-// util.follow: STEADY holds a still face still, a fast move passes straight through
-static void follow(struct track *t, const float *nw, float s, float scale)
-{
-	float sq = 0.0f;
-	for (int i = 0; i < 4; i++) {
-		t->v[i] += ((nw[i] - t->in[i]) - t->v[i]) * 0.4f;
-		sq += t->v[i] * t->v[i];
-	}
-	const float sp = sqrtf(sq / 2.0f) / fmaxf(scale, 1e-6f);
-	const float x = fmaxf(0.0f, sp - 0.03f) / 0.05f;
-	const float r = (1.0f - s) / fmaxf(s, 1e-3f) + x * x;
-	const float a = r / (1.0f + r);
-	for (int i = 0; i < 4; i++) {
-		t->in[i] = nw[i];
-		t->box[i] += (nw[i] - t->box[i]) * a;
-	}
-}
-
-static void start(struct track *t, const float *b)
-{
-	t->on = true;
-	t->lost = 0.0f;
-	memcpy(t->box, b, sizeof(t->box));
-	memcpy(t->in, b, sizeof(t->in));
-	memset(t->v, 0, sizeof(t->v));
-}
-
-// new finder results (in grey-picture pixels, k = source pixels per grey pixel): match each to the nearest track
-static void update_tracks(struct censor *f, const struct fd_rect *r, int n, float k)
-{
-	bool used[MAX_FACES] = {false};
-	for (int i = 0; i < n; i++) {
-		// the cascade's square runs brow to lip: stretch it to the whole face, chin included
-		const float b[4] = {r[i].x * k, (r[i].y - 0.05f * r[i].h) * k, (r[i].x + r[i].w) * k, (r[i].y + r[i].h * 1.12f) * k};
-		const float cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2, bw = b[2] - b[0];
-		int best = -1;
-		float bd = 1e30f;
-		for (int j = 0; j < MAX_FACES; j++) {
-			struct track *t = &f->tr[j];
-			if (!t->on || used[j])
-				continue;
-			const float d = fabsf((t->box[0] + t->box[2]) / 2 - cx) + fabsf((t->box[1] + t->box[3]) / 2 - cy);
-			if (d < bd) {
-				bd = d;
-				best = j;
-			}
-		}
-		struct track *t = NULL;
-		if (best >= 0 && bd < 2.0f * fmaxf(bw, f->tr[best].box[2] - f->tr[best].box[0])) {
-			t = &f->tr[best];
-			if (f->smooth > 0.0f)
-				follow(t, b, f->smooth, fmaxf(bw, 20.0f));
-			else
-				start(t, b);
-			t->lost = 0.0f;
-			used[best] = true;
-			continue;
-		}
-		for (int j = 0; j < MAX_FACES && !t; j++)
-			if (!f->tr[j].on) // a jump (new person / camera cut) starts fresh instead of sliding over
-				t = &f->tr[j];
-		if (t) {
-			start(t, b);
-			used[t - f->tr] = true;
-		}
-	}
-	memcpy(f->seen_now, used, sizeof(used));
 }
 
 // ---------------------------------------------------------------- settings
@@ -331,17 +162,8 @@ static void *censor_create(obs_data_t *settings, obs_source_t *source)
 	struct censor *f = bzalloc(sizeof(*f));
 	f->ctx = source;
 	f->dt = 1.0f / 30.0f;
-	lock_init(&f->lk);
-	cond_init(&f->cv);
-#ifdef _WIN32
-	f->thread = CreateThread(NULL, 0, worker, f, 0, NULL);
-	f->running = f->thread != NULL;
-#else
-	f->running = pthread_create(&f->thread, NULL, worker, f) == 0;
-#endif
-	if (!f->running)
-		blog(LOG_ERROR, "[face censor] could not start the face-finding thread");
-	blog(LOG_INFO, "[face censor] v" CENSOR_VERSION " created, finder thread %s", f->running ? "running" : "FAILED");
+	f->ft = ft_create();
+	blog(LOG_INFO, "[face censor] v" CENSOR_VERSION " created, finder thread %s", ft_running(f->ft) ? "running" : "FAILED");
 
 	obs_enter_graphics();
 	char *err = NULL;
@@ -350,7 +172,6 @@ static void *censor_create(obs_data_t *settings, obs_source_t *source)
 		blog(LOG_ERROR, "[face censor] v" CENSOR_VERSION " effect failed to compile: %s", err ? err : "?");
 	bfree(err);
 	f->cur = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
-	f->grey = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	f->small = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	f->bl[0] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
 	f->bl[1] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
@@ -363,29 +184,14 @@ static void *censor_create(obs_data_t *settings, obs_source_t *source)
 static void censor_destroy(void *data)
 {
 	struct censor *f = data;
-	if (f->running) {
-		lock(&f->lk);
-		f->quit = true;
-		cond_signal(&f->cv);
-		unlock(&f->lk);
-#ifdef _WIN32
-		WaitForSingleObject(f->thread, INFINITE);
-		CloseHandle(f->thread);
-#else
-		pthread_join(f->thread, NULL);
-#endif
-	}
+	ft_destroy(f->ft);
 	obs_enter_graphics();
 	gs_effect_destroy(f->effect);
 	gs_texrender_destroy(f->cur);
-	gs_texrender_destroy(f->grey);
 	gs_texrender_destroy(f->small);
 	gs_texrender_destroy(f->bl[0]);
 	gs_texrender_destroy(f->bl[1]);
-	gs_stagesurface_destroy(f->stage[0]);
-	gs_stagesurface_destroy(f->stage[1]);
 	obs_leave_graphics();
-	bfree(f->job);
 	bfree(f);
 }
 
@@ -394,9 +200,7 @@ static void censor_tick(void *data, float seconds)
 	struct censor *f = data;
 	f->rendered = false;
 	f->dt = seconds > 0.0f && seconds < 0.25f ? seconds : 1.0f / 30.0f;
-	for (int i = 0; i < MAX_FACES; i++)
-		if (f->tr[i].on && (f->tr[i].lost += f->dt) > f->hold + 0.15f) // + the finder's own gap between looks
-			f->tr[i].on = false;
+	ft_tick(f->ft, f->dt, f->mode == 2 ? 0.0f : f->hold);
 }
 
 // ---------------------------------------------------------------- render
@@ -468,67 +272,6 @@ static void make_blur(struct censor *f, float r)
 	pass(f, f->bl[0], sw, sh, "BlurV");
 }
 
-// make the grey copy, read back last frame's and hand it to the worker if it is free, take any new results
-static void find_faces(struct censor *f)
-{
-	const uint32_t gw = f->small_faces ? 480 : 320;
-	const uint32_t gh = (uint32_t)fmaxf(24.0f, roundf((float)gw * f->h / f->w));
-	if (gw != f->gw || gh != f->gh) {
-		f->gw = gw;
-		f->gh = gh;
-		for (int i = 0; i < 2; i++) {
-			gs_stagesurface_destroy(f->stage[i]);
-			f->stage[i] = gs_stagesurface_create(gw, gh, GS_RGBA);
-		}
-		f->stage_ok = false;
-	}
-	set_tex(f, "image", f->cur);
-	set_vec2(f, "cell", 1.0f / gw, 1.0f / gh);
-	pass(f, f->grey, gw, gh, "Grey");
-
-	if (f->stage[0] && f->stage[1]) {
-		uint8_t *px;
-		uint32_t ls;
-		if (f->stage_ok && f->running && gs_stagesurface_map(f->stage[0], &px, &ls)) {
-			lock(&f->lk);
-			if (!f->pending) {
-				if (f->jcap < (size_t)gw * gh) {
-					bfree(f->job);
-					f->jcap = (size_t)gw * gh;
-					f->job = bmalloc(f->jcap);
-				}
-				for (uint32_t y = 0; y < gh; y++)
-					for (uint32_t x = 0; x < gw; x++)
-						f->job[y * gw + x] = px[y * ls + x * 4];
-				f->jw = (int)gw;
-				f->jh = (int)gh;
-				f->pending = true;
-				cond_signal(&f->cv);
-			}
-			unlock(&f->lk);
-			gs_stagesurface_unmap(f->stage[0]);
-		}
-		gs_stage_texture(f->stage[1], gs_texrender_get_texture(f->grey));
-		gs_stagesurf_t *t = f->stage[0];
-		f->stage[0] = f->stage[1];
-		f->stage[1] = t;
-		f->stage_ok = true;
-	}
-
-	lock(&f->lk);
-	if (f->seq != f->seen_seq) {
-		f->seen_seq = f->seq;
-		struct fd_rect r[MAX_FACES];
-		const int n = f->nres;
-		const float k = (float)f->w / (float)(f->jw > 0 ? f->jw : 1);
-		memcpy(r, f->res, sizeof(r));
-		unlock(&f->lk);
-		update_tracks(f, r, n, k);
-	} else {
-		unlock(&f->lk);
-	}
-}
-
 // debug: one line every 2 s (and whenever the whole-picture blur turns on or off) in the OBS log
 static void debug_log(struct censor *f, int nf, bool cover)
 {
@@ -539,25 +282,10 @@ static void debug_log(struct censor *f, int nf, bool cover)
 	f->log_t += f->dt;
 	if (f->log_t < 2.0f)
 		return;
-	lock(&f->lk);
-	const uint64_t runs = f->runs, ns = f->run_ns;
-	const int raw = f->last_raw, jw = f->jw, jh = f->jh;
-	f->runs = f->run_ns = 0;
-	unlock(&f->lk);
-	char tr[MAX_FACES * 64] = "", one[64];
-	for (int i = 0; i < MAX_FACES; i++) {
-		const struct track *t = &f->tr[i];
-		if (!t->on)
-			continue;
-		snprintf(one, sizeof(one), " #%d %s %.2fs at %.0f,%.0f %.0fx%.0f", i, f->seen_now[i] ? "seen" : "held", t->lost, t->box[0],
-			 t->box[1], t->box[2] - t->box[0], t->box[3] - t->box[1]);
-		strncat(tr, one, sizeof(tr) - strlen(tr) - 1);
-	}
-	blog(LOG_INFO,
-	     "[face censor] v" CENSOR_VERSION " %ux%u mode=%d cover_lost=%d hold=%.2f small=%d | finder %dx%d thread=%s %.1f looks/s %.1f ms/look, "
-	     "last look found %d | tracks:%s | drawn=%d cover=%d",
-	     f->w, f->h, f->mode, f->cover_lost, f->hold, f->small_faces, jw, jh, f->running ? "ok" : "FAILED", runs / f->log_t,
-	     runs ? ns / 1e6 / runs : 0.0, raw, tr[0] ? tr : " none", nf, cover);
+	char st[512];
+	ft_status(f->ft, f->log_t, st, sizeof(st));
+	blog(LOG_INFO, "[face censor] v" CENSOR_VERSION " %ux%u mode=%d cover_lost=%d hold=%.2f small=%d | %s | drawn=%d cover=%d", f->w, f->h,
+	     f->mode, f->cover_lost, f->hold, f->small_faces, st, nf, cover);
 	f->log_t = 0.0f;
 }
 
@@ -583,11 +311,8 @@ static void censor_render(void *data, gs_effect_t *unused)
 	if (!f->rendered) {
 		f->rendered = true;
 		f->rendered_log = true;
-		if (w != f->w || h != f->h) {
-			f->w = w;
-			f->h = h;
-			memset(f->tr, 0, sizeof(f->tr));
-		}
+		f->w = w;
+		f->h = h;
 		gs_blend_state_push();
 		gs_enable_blending(false);
 		if (!capture_source(f, w, h)) {
@@ -595,14 +320,14 @@ static void censor_render(void *data, gs_effect_t *unused)
 			gs_enable_framebuffer_srgb(srgb);
 			return;
 		}
-		if (!whole)
-			find_faces(f);
 		gs_blend_state_pop();
+		if (!whole)
+			ft_step(f->ft, gs_texrender_get_texture(f->cur), w, h, f->small_faces, f->smooth);
 	}
 
 	// the shapes, as censor.py sizes them from the face box
 	for (int i = 0; i < MAX_FACES && !whole; i++) {
-		const struct track *t = &f->tr[i];
+		const struct ft_track *t = &f->ft->tr[i];
 		if (!t->on)
 			continue;
 		const float x0 = t->box[0], y0 = t->box[1], x1 = t->box[2], y1 = t->box[3];
@@ -669,8 +394,8 @@ static void censor_render(void *data, gs_effect_t *unused)
 	static const char *tn[MAX_FACES] = {"t0", "t1", "t2", "t3"};
 	float tst[MAX_FACES];
 	for (int i = 0; i < MAX_FACES; i++) {
-		const struct track *t = &f->tr[i];
-		tst[i] = whole || !t->on ? 0.0f : f->seen_now[i] ? 1.0f : 2.0f;
+		const struct ft_track *t = &f->ft->tr[i];
+		tst[i] = whole || !t->on ? 0.0f : t->seen ? 1.0f : 2.0f;
 		set_vec4(f, tn[i], t->box[0], t->box[1], t->box[2], t->box[3]);
 	}
 	set_vec4(f, "tst", tst[0], tst[1], tst[2], tst[3]);
