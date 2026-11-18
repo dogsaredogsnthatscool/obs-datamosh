@@ -2,14 +2,93 @@
 // Smiley, Sunglasses and Heart eyes are drawn by the shader; "Your own image" loads any PNG / JPG / GIF (GIFs animate).
 
 #include <obs-module.h>
-#include <graphics/image-file.h>
+#include <graphics/graphics.h>
 #include <graphics/vec2.h>
 #include <graphics/vec4.h>
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "sticker-effect.h" // STICKER_EFFECT: src/sticker.effect as a string, made by build.sh
 #include "facetrack.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+/* OBS 33 renamed gs_image_file_* to gs_image_file_ex_* (and dropped the old
+ * names), so importing either set by name stops the DLL loading on the other
+ * OBS. Look them up at run time instead. Both structs start with the same
+ * fields (texture, format, cx, cy, is_animated_gif, frame_updated, loaded);
+ * the rest is opaque and given plenty of room. */
+struct img_file {
+	gs_texture_t *texture;
+	int format;
+	uint32_t cx, cy;
+	bool is_animated_gif, frame_updated, loaded;
+	uint8_t rest[1024];
+};
+static struct {
+	bool tried, ex;
+	void (*init_ex)(void *, const char *, int);
+	void (*init)(void *, const char *);
+	void (*free)(void *);
+	void (*init_texture)(void *);
+	bool (*tick)(void *, uint64_t);
+	void (*update_texture)(void *);
+} img_api;
+
+static void *obs_sym(const char *name)
+{
+#ifdef _WIN32
+	HMODULE m = GetModuleHandleA("obs.dll");
+	return m ? (void *)GetProcAddress(m, name) : NULL;
+#else
+	return dlsym(RTLD_DEFAULT, name);
+#endif
+}
+
+static bool img_api_ok(void)
+{
+	if (!img_api.tried) {
+		img_api.tried = true;
+		img_api.init_ex = obs_sym("gs_image_file_ex_init");
+		img_api.ex = img_api.init_ex != NULL;
+		const char *pre = img_api.ex ? "gs_image_file_ex_" : "gs_image_file_";
+		char n[64];
+#define IMG_SYM(f) (snprintf(n, sizeof n, "%s%s", pre, #f), img_api.f = obs_sym(n))
+		if (!img_api.ex)
+			IMG_SYM(init);
+		IMG_SYM(free);
+		IMG_SYM(init_texture);
+		IMG_SYM(tick);
+		IMG_SYM(update_texture);
+#undef IMG_SYM
+		blog(LOG_INFO, "[face sticker] image loader: %s", img_api.ex ? "gs_image_file_ex" : "gs_image_file");
+	}
+	return (img_api.init_ex || img_api.init) && img_api.free && img_api.init_texture && img_api.tick &&
+	       img_api.update_texture;
+}
+
+static void img_free(struct img_file *im)
+{
+	if (img_api_ok())
+		img_api.free(im);
+	memset(im, 0, sizeof(*im));
+}
+
+static void img_init(struct img_file *im, const char *path)
+{
+	memset(im, 0, sizeof(*im));
+	if (!img_api_ok())
+		return;
+	if (img_api.ex)
+		img_api.init_ex(im, path, 0 /* GS_IMAGE_ALPHA_STRAIGHT, what the old init used */);
+	else
+		img_api.init(im, path);
+}
 
 #define STICKER_VERSION "1.4.0-beta"
 
@@ -20,7 +99,7 @@ struct sticker {
 	gs_effect_t *effect;
 	gs_texrender_t *cur;
 	struct facetrack *ft;
-	gs_image_file_t img;
+	struct img_file img;
 	bool img_ok;
 	char *path;
 	bool rendered, rendered_log;
@@ -44,14 +123,15 @@ static void load_image(struct sticker *f, const char *path)
 	bfree(f->path);
 	f->path = path && *path ? bstrdup(path) : NULL;
 	obs_enter_graphics();
-	gs_image_file_free(&f->img);
+	img_free(&f->img);
 	obs_leave_graphics();
 	f->img_ok = false;
 	if (!f->path)
 		return;
-	gs_image_file_init(&f->img, f->path);
+	img_init(&f->img, f->path);
 	obs_enter_graphics();
-	gs_image_file_init_texture(&f->img);
+	if (img_api_ok())
+		img_api.init_texture(&f->img);
 	obs_leave_graphics();
 	f->img_ok = f->img.loaded && f->img.texture;
 	if (!f->img_ok)
@@ -142,7 +222,7 @@ static void sticker_destroy(void *data)
 	obs_enter_graphics();
 	gs_effect_destroy(f->effect);
 	gs_texrender_destroy(f->cur);
-	gs_image_file_free(&f->img);
+	img_free(&f->img);
 	obs_leave_graphics();
 	bfree(f->path);
 	bfree(f);
@@ -154,9 +234,9 @@ static void sticker_tick(void *data, float seconds)
 	f->rendered = false;
 	f->dt = seconds > 0.0f && seconds < 0.25f ? seconds : 1.0f / 30.0f;
 	ft_tick(f->ft, f->dt, f->hold);
-	if (f->img_ok && gs_image_file_tick(&f->img, (uint64_t)(seconds * 1e9))) { // an animated GIF moved on a frame
+	if (f->img_ok && img_api.tick(&f->img, (uint64_t)(seconds * 1e9))) { // an animated GIF moved on a frame
 		obs_enter_graphics();
-		gs_image_file_update_texture(&f->img);
+		img_api.update_texture(&f->img);
 		obs_leave_graphics();
 	}
 }

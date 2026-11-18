@@ -11,19 +11,19 @@ And four face filters: **Face Censor** (an eye bar, pixelated face or news-style
 
 ## Requirements
 
-- OBS Studio **31.1 or newer** (made for 32.1.0), 64-bit Windows 10 or 11
+- OBS Studio **31.1 or newer**, including OBS 33 (tested on 33.0.1), 64-bit Windows 10 or 11
 - Any GPU that runs OBS
 
 ## Install
 
 1. Close OBS.
-2. Download **`datamosh-filter.zip`** from the [latest release](../../releases/latest).
-3. Unzip it into `C:\Program Files\obs-studio\`. It contains just one file, which lands at:
-   ```
-   C:\Program Files\obs-studio\obs-plugins\64bit\datamosh-filter.dll
-   ```
-   Windows will ask for admin permission to copy into Program Files; that's normal.
+2. Download **`datamosh-filter-setup.exe`** from the [latest release](../../releases/latest) and run it.
+3. It finds your OBS folder (normally `C:\Program Files\obs-studio`); click **Install**. Windows asks for admin permission; that's normal.
 4. Start OBS.
+
+To remove it later: **Settings → Apps → Installed apps → Datamosh OBS Filters → Uninstall**.
+
+**Manual install instead:** download **`datamosh-filter.zip`**, close OBS and unzip it into `C:\Program Files\obs-studio\`. It holds one file, which lands at `C:\Program Files\obs-studio\obs-plugins\64bit\datamosh-filter.dll`.
 
 ## Use it
 
